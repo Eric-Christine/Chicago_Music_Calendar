@@ -1,0 +1,59 @@
+name: Sync events and deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Every 6 hours, re-scrape venue feeds so the calendar keeps itself current
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Scrape latest events
+        continue-on-error: true
+        run: npm run sync
+        env:
+          TM_API_KEY: ${{ secrets.TM_API_KEY }}
+          TM_API_KEY_EMPTY_BOTTLE: ${{ secrets.TM_API_KEY_EMPTY_BOTTLE }}
+          TM_API_KEY_ALT: ${{ secrets.TM_API_KEY_ALT }}
+
+      - name: Keep committed snapshot if the scrape came back empty
+        run: |
+          count=$(node -e "console.log(JSON.parse(require('fs').readFileSync('public/events_snapshot.json','utf8')).events?.length || 0)")
+          echo "Events in snapshot: $count"
+          if [ "$count" -eq 0 ]; then git checkout -- public/events_snapshot.json; fi
+
+      - run: npm run build:static
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

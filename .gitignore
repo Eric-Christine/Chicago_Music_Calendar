@@ -1,0 +1,6 @@
+node_modules
+dist
+.DS_Store
+server/events_cache.json
+public/calendar.ics
+.env
