@@ -920,7 +920,11 @@ export async function syncAllChicagoMusicEvents() {
     ...hideoutEvents,
   ]);
 
-  const enriched = await enrichArtistsWithPreviews(deduped);
+  // Venue calendars also list closures and private rentals, which aren't shows
+  const NOT_A_SHOW = /^closed\b|private (event|rental|party)|\[private\]|pop-up box office/i;
+  const shows = deduped.filter((ev) => !NOT_A_SHOW.test(ev.title) && !NOT_A_SHOW.test(ev.headliner));
+
+  const enriched = await enrichArtistsWithPreviews(shows);
 
   const payload = {
     lastSyncedAt: new Date().toISOString(),

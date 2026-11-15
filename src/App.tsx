@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Calendar as CalendarIcon,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Compass,
@@ -14,9 +15,10 @@ import {
   Play,
   RefreshCw,
   Search,
-  Sparkles,
   Ticket,
+  X,
 } from 'lucide-react';
+import { GENRE_FAMILIES, OTHER_GENRE, genreFamily, genreFamilyIds } from './genres';
 
 export interface Venue {
   id: string;
@@ -78,6 +80,8 @@ interface CalendarPayload {
   events: MusicEvent[];
 }
 
+type ViewMode = 'month' | 'agenda' | 'radar';
+
 const CORRIDORS = [
   'ALL',
   'Salt Shed / Elston',
@@ -88,30 +92,163 @@ const CORRIDORS = [
 ];
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const AGENDA_PAGE_DAYS = 14;
 
 // Static builds (GitHub Pages) have no API server; data comes from the snapshot refreshed by CI
 const IS_STATIC = import.meta.env.VITE_STATIC === '1';
 const BASE = import.meta.env.BASE_URL;
 
+function chicagoToday() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+}
+
+function formatDate(dateStr: string, opts: Intl.DateTimeFormatOptions) {
+  return new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', opts);
+}
+
+function ShowThumb({ ev }: { ev: MusicEvent }) {
+  const [failed, setFailed] = useState(false);
+  if (ev.imageUrl && !failed) {
+    return (
+      <img
+        src={ev.imageUrl}
+        alt=""
+        className="show-thumb"
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <div className="show-thumb show-thumb-empty">
+      <Music size={22} color={ev.venueColor} />
+    </div>
+  );
+}
+
+interface ShowCardProps {
+  ev: MusicEvent;
+  isPlaying: boolean;
+  embedOpen: boolean;
+  activeGenres: string[];
+  onTogglePreview: (ev: MusicEvent) => void;
+  onToggleEmbed: (ev: MusicEvent) => void;
+  onToggleGenre: (id: string) => void;
+}
+
+function ShowCard({
+  ev,
+  isPlaying,
+  embedOpen,
+  activeGenres,
+  onTogglePreview,
+  onToggleEmbed,
+  onToggleGenre,
+}: ShowCardProps) {
+  return (
+    <article className="show-card" style={{ '--venue-color': ev.venueColor } as React.CSSProperties}>
+      <div className="show-card-top">
+        <ShowThumb ev={ev} />
+        <div className="show-card-text">
+          <div className="show-headline">{ev.headliner}</div>
+          {ev.support.length > 0 && <div className="show-support">w/ {ev.support.join(', ')}</div>}
+          <div className="show-venue">
+            {ev.venueName} <span>· {ev.time}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="show-tags">
+        {genreFamilyIds(ev.genre)
+          .filter((id) => id !== OTHER_GENRE.id)
+          .map((id) => {
+            const fam = genreFamily(id);
+            return (
+              <button
+                key={id}
+                className={`tag tag-genre ${activeGenres.includes(id) ? 'active' : ''}`}
+                onClick={() => onToggleGenre(id)}
+                title={`Filter by ${fam.label}`}
+              >
+                <span className="dot" style={{ backgroundColor: fam.color }} />
+                {fam.label}
+              </button>
+            );
+          })}
+        {ev.soldOut && <span className="tag tag-soldout">Sold out</span>}
+        {ev.price && <span className="tag">{ev.price}</span>}
+        {ev.ageRestriction && <span className="tag">{ev.ageRestriction}</span>}
+        <span className="tag">
+          {ev.neighborhood} · {ev.distanceMiles} mi
+        </span>
+      </div>
+
+      {ev.previewTrackTitle && (
+        <div className="show-track">
+          <Headphones size={12} /> {ev.previewTrackTitle}
+        </div>
+      )}
+
+      {embedOpen && ev.spotifyArtistId && (
+        <iframe
+          title={`${ev.headliner} on Spotify`}
+          src={`https://open.spotify.com/embed/artist/${ev.spotifyArtistId}?utm_source=generator&theme=0`}
+          width="100%"
+          height="152"
+          frameBorder="0"
+          allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+          loading="lazy"
+          className="spotify-embed"
+        />
+      )}
+
+      <div className="show-actions">
+        {ev.previewAudioUrl && (
+          <button className="btn btn-spotify" onClick={() => onTogglePreview(ev)}>
+            {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+            {isPlaying ? 'Pause' : 'Preview'}
+          </button>
+        )}
+        {ev.spotifyArtistId ? (
+          <button className="btn btn-spotify" onClick={() => onToggleEmbed(ev)}>
+            <Headphones size={14} /> {embedOpen ? 'Hide player' : 'Spotify'}
+          </button>
+        ) : (
+          <a className="btn btn-spotify" href={ev.spotifyUrl} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} /> Spotify
+          </a>
+        )}
+        <a className="btn btn-primary" href={ev.ticketUrl} target="_blank" rel="noreferrer">
+          <Ticket size={14} /> Tickets
+        </a>
+      </div>
+    </article>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState<CalendarPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const today = useMemo(chicagoToday, []);
 
   // Filters
   const [selectedCorridor, setSelectedCorridor] = useState<string>('ALL');
   const [selectedVenueIds, setSelectedVenueIds] = useState<string[]>([]);
+  const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
   const [maxDistance, setMaxDistance] = useState<number>(10);
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [viewMode, setViewMode] = useState<'month' | 'agenda' | 'radar'>('month');
+  const [viewMode, setViewMode] = useState<ViewMode>('month');
+  const [venuesOpen, setVenuesOpen] = useState(false);
+  const [agendaDays, setAgendaDays] = useState(AGENDA_PAGE_DAYS);
 
-  // Calendar Navigation (default Nov 2026 based on current date)
-  const [currentMonth, setCurrentMonth] = useState<{ year: number; month: number }>({
-    year: 2026,
-    month: 10, // 0-indexed: 10 = November
+  const [currentMonth, setCurrentMonth] = useState<{ year: number; month: number }>(() => {
+    const [y, m] = today.split('-').map(Number);
+    return { year: y, month: m - 1 };
   });
-  const [selectedDate, setSelectedDate] = useState<string>('2026-11-13');
+  const [selectedDate, setSelectedDate] = useState<string>(today);
   const [activeSpotifyEmbed, setActiveSpotifyEmbed] = useState<string | null>(null);
+  const lineupRef = useRef<HTMLElement | null>(null);
 
   // Audio player for 30s track previews
   const [playingEventId, setPlayingEventId] = useState<string | null>(null);
@@ -131,14 +268,6 @@ export default function App() {
       }
       const json: CalendarPayload = await res.json();
       setData(json);
-      if (json.events?.length) {
-        const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
-        const hasToday = json.events.some((e) => e.date === todayStr);
-        const firstDate = hasToday ? todayStr : json.events[0].date;
-        setSelectedDate(firstDate);
-        const [y, m] = firstDate.split('-').map(Number);
-        setCurrentMonth({ year: y, month: m - 1 });
-      }
     } catch (err) {
       console.error('Failed to load calendar:', err);
     } finally {
@@ -172,10 +301,14 @@ export default function App() {
       }
       const audio = new Audio(ev.previewAudioUrl);
       audio.onended = () => setPlayingEventId(null);
-      audio.play();
+      audio.play().catch(() => setPlayingEventId(null));
       audioRef.current = audio;
       setPlayingEventId(ev.id);
     }
+  }
+
+  function toggleSpotifyEmbed(ev: MusicEvent) {
+    setActiveSpotifyEmbed((prev) => (prev === ev.id ? null : ev.id));
   }
 
   function toggleVenueFilter(venueId: string) {
@@ -183,6 +316,43 @@ export default function App() {
       prev.includes(venueId) ? prev.filter((id) => id !== venueId) : [...prev, venueId]
     );
   }
+
+  function toggleGenreFilter(genreId: string) {
+    setSelectedGenres((prev) =>
+      prev.includes(genreId) ? prev.filter((id) => id !== genreId) : [...prev, genreId]
+    );
+  }
+
+  function clearFilters() {
+    setSelectedCorridor('ALL');
+    setSelectedVenueIds([]);
+    setSelectedGenres([]);
+    setMaxDistance(10);
+    setSearchQuery('');
+  }
+
+  function goToDate(dateStr: string) {
+    const [y, m] = dateStr.split('-').map(Number);
+    setCurrentMonth({ year: y, month: m - 1 });
+    setSelectedDate(dateStr);
+  }
+
+  function selectDay(dateStr: string) {
+    setSelectedDate(dateStr);
+    // When the lineup is stacked far below a tall calendar, bring it into view
+    requestAnimationFrame(() => {
+      const el = lineupRef.current;
+      if (el && el.getBoundingClientRect().top > window.innerHeight - 120) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  }
+
+  // Snapshots can be hours old and some feeds list past dates; only show today onward
+  const upcomingEvents = useMemo(
+    () => (data?.events || []).filter((ev) => ev.date >= today),
+    [data, today]
+  );
 
   const filteredVenues = useMemo(() => {
     if (!data?.venues) return [];
@@ -193,26 +363,42 @@ export default function App() {
     });
   }, [data, selectedCorridor, maxDistance]);
 
-  const filteredEvents = useMemo(() => {
-    if (!data?.events) return [];
+  // Counts on genre and venue chips ignore that chip group's own selection,
+  // so they show what picking another option would add
+  const { filteredEvents, genreCounts, venueCounts } = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return data.events.filter((ev) => {
-      if (selectedCorridor !== 'ALL' && ev.corridor !== selectedCorridor) return false;
-      if (selectedVenueIds.length > 0 && !selectedVenueIds.includes(ev.venueId)) return false;
-      if (ev.distanceMiles > maxDistance) return false;
+    const filtered: MusicEvent[] = [];
+    const genreCounts: Record<string, number> = {};
+    const venueCounts: Record<string, number> = {};
+
+    for (const ev of upcomingEvents) {
+      if (selectedCorridor !== 'ALL' && ev.corridor !== selectedCorridor) continue;
+      if (ev.distanceMiles > maxDistance) continue;
+      const families = genreFamilyIds(ev.genre);
       if (q) {
-        const matchArtist = ev.headliner.toLowerCase().includes(q);
-        const matchTitle = ev.title.toLowerCase().includes(q);
-        const matchSupport = ev.support.some((s) => s.toLowerCase().includes(q));
-        const matchVenue = ev.venueName.toLowerCase().includes(q);
-        const matchGenre = ev.genre.toLowerCase().includes(q);
-        if (!matchArtist && !matchTitle && !matchSupport && !matchVenue && !matchGenre) {
-          return false;
-        }
+        const haystack = [
+          ev.headliner,
+          ev.title,
+          ...ev.support,
+          ev.venueName,
+          ev.neighborhood,
+          ev.genre,
+          ...families.map((id) => genreFamily(id).label),
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(q)) continue;
       }
-      return true;
-    });
-  }, [data, selectedCorridor, selectedVenueIds, maxDistance, searchQuery]);
+
+      const venueOk = selectedVenueIds.length === 0 || selectedVenueIds.includes(ev.venueId);
+      const genreOk = selectedGenres.length === 0 || families.some((id) => selectedGenres.includes(id));
+
+      if (venueOk) for (const id of families) genreCounts[id] = (genreCounts[id] || 0) + 1;
+      if (genreOk) venueCounts[ev.venueId] = (venueCounts[ev.venueId] || 0) + 1;
+      if (venueOk && genreOk) filtered.push(ev);
+    }
+    return { filteredEvents: filtered, genreCounts, venueCounts };
+  }, [upcomingEvents, selectedCorridor, selectedVenueIds, selectedGenres, maxDistance, searchQuery]);
 
   // Group events by YYYY-MM-DD
   const eventsByDate = useMemo(() => {
@@ -223,6 +409,8 @@ export default function App() {
     }
     return map;
   }, [filteredEvents]);
+
+  const sortedDates = useMemo(() => Object.keys(eventsByDate).sort(), [eventsByDate]);
 
   // Build calendar cells for currentMonth
   const calendarDays = useMemo(() => {
@@ -256,7 +444,7 @@ export default function App() {
       });
     }
 
-    // Next month padding to complete 6-column or 5-column week rows
+    // Next month padding to complete the last week row
     const remainder = (7 - (cells.length % 7)) % 7;
     for (let d = 1; d <= remainder; d++) {
       const nm = month === 11 ? 1 : month + 2;
@@ -272,6 +460,19 @@ export default function App() {
   }, [currentMonth]);
 
   const selectedDayEvents = eventsByDate[selectedDate] || [];
+  const nextDateWithShows = sortedDates.find((d) => d > selectedDate) || sortedDates[0];
+  const tonightCount = (eventsByDate[today] || []).length;
+  const previewCount = useMemo(
+    () => filteredEvents.filter((e) => e.previewAudioUrl || e.spotifyArtistId).length,
+    [filteredEvents]
+  );
+
+  const activeFilterCount =
+    selectedGenres.length +
+    selectedVenueIds.length +
+    (selectedCorridor !== 'ALL' ? 1 : 0) +
+    (maxDistance < 10 ? 1 : 0) +
+    (searchQuery.trim() ? 1 : 0);
 
   function changeMonth(delta: number) {
     setCurrentMonth((prev) => {
@@ -295,244 +496,265 @@ export default function App() {
 
   if (loading && !data) {
     return (
-      <div className="app-shell" style={{ textAlign: 'center', paddingTop: 120 }}>
-        <RefreshCw size={36} style={{ animation: 'spin 1s linear infinite', color: '#f97316' }} />
-        <h2 style={{ marginTop: 16 }}>Syncing Ward 1 Chicago Live Music Calendar...</h2>
+      <div className="app-shell loading-screen">
+        <RefreshCw size={32} className="spin" />
+        <p>Loading the lineup…</p>
       </div>
     );
   }
 
+  if (!data) {
+    return (
+      <div className="app-shell loading-screen">
+        <p>Couldn’t load the calendar. Refresh to try again.</p>
+      </div>
+    );
+  }
+
+  const cardProps = {
+    activeGenres: selectedGenres,
+    onTogglePreview: toggleAudioPreview,
+    onToggleEmbed: toggleSpotifyEmbed,
+    onToggleGenre: toggleGenreFilter,
+  };
+
   return (
     <div className="app-shell">
       {/* Header */}
-      <header className="hero-header">
-        <div className="hero-title-group">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-            <span className="ward-badge">
-              <MapPin size={13} /> Ward 1 Center • ≤{maxDistance} Mi Radius
-            </span>
-            <span
-              style={{
-                fontSize: '0.78rem',
-                color: '#94a3b8',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 5,
-              }}
+      <header className="hero">
+        <div className="hero-main">
+          <span className="hero-eyebrow">
+            <MapPin size={13} /> Ward 1 · Wicker Park / Logan Square · within 10 mi
+          </span>
+          <h1>
+            Chicago Live Music <em>Calendar</em>
+          </h1>
+          <p className="hero-subtitle">
+            Who’s playing every night at the Salt Shed, along Milwaukee Ave, Radius, Empty Bottle,
+            Thalia Hall, Metro and {Math.max(0, data.venues.length - 6)} more stages.
+          </p>
+          <div className="hero-actions">
+            {!IS_STATIC && (
+              <button className="btn btn-primary" onClick={handleManualSync} disabled={syncing}>
+                <RefreshCw size={15} className={syncing ? 'spin' : ''} />
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </button>
+            )}
+            <a
+              className="btn"
+              href={
+                IS_STATIC
+                  ? `${BASE}calendar.ics`
+                  : `${BASE}api/calendar.ics?corridor=${encodeURIComponent(selectedCorridor)}`
+              }
+              download="chicago-ward1-music.ics"
             >
-              <Sparkles size={13} color="#f97316" /> Auto-Synced via Ticketmaster, TicketWeb, DICE, AXS &
-              Venue Feeds + Spotify
+              <Download size={15} />
+              Export .ics
+            </a>
+            <span className="hero-updated">
+              Updated{' '}
+              {new Date(data.lastSyncedAt).toLocaleString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+              })}
             </span>
           </div>
-          <h1>Chicago Live Music Calendar</h1>
-          <p className="hero-subtitle">
-            Tracking who is playing every day across <strong>The Salt Shed</strong>, the{' '}
-            <strong>Milwaukee Ave Corridor</strong> (Subterranean, Concord, Chop Shop, Cole&apos;s, The
-            Whistler, Sleeping Village), <strong>Radius</strong>, <strong>Empty Bottle</strong>,{' '}
-            <strong>Thalia Hall</strong>, <strong>Metro</strong>, <strong>Lincoln Hall</strong> &amp; 25+
-            stages within 10 miles of Ward 1.
-          </p>
         </div>
 
-        <div className="sync-controls">
-          {!IS_STATIC && (
-            <button className="btn btn-primary" onClick={handleManualSync} disabled={syncing}>
-              <RefreshCw size={15} />
-              {syncing ? 'Syncing Live Sources...' : 'Sync Now'}
-            </button>
-          )}
-          <a
-            className="btn"
-            href={
-              IS_STATIC
-                ? `${BASE}calendar.ics`
-                : `${BASE}api/calendar.ics?corridor=${encodeURIComponent(selectedCorridor)}`
-            }
-            download="chicago-ward1-music.ics"
-          >
-            <Download size={15} />
-            Export .ICS Calendar
-          </a>
-        </div>
+        <dl className="hero-stats">
+          <div className="stat">
+            <dt>Shows</dt>
+            <dd>{filteredEvents.length}</dd>
+          </div>
+          <div className="stat">
+            <dt>Tonight</dt>
+            <dd>{tonightCount}</dd>
+          </div>
+          <div className="stat">
+            <dt>Venues</dt>
+            <dd>{filteredVenues.length}</dd>
+          </div>
+          <div className="stat">
+            <dt>Previews</dt>
+            <dd>{previewCount}</dd>
+          </div>
+        </dl>
       </header>
 
-      {/* KPI Metrics */}
-      <section className="kpi-strip">
-        <div className="kpi-card">
-          <span className="kpi-label">Upcoming Shows Synced</span>
-          <span className="kpi-value">{filteredEvents.length}</span>
-          <span className="kpi-sub">
-            From {data?.sourceBreakdown?.rawTotal || filteredEvents.length} raw listings deduplicated
-          </span>
-        </div>
-        <div className="kpi-card">
-          <span className="kpi-label">Venues Within {maxDistance} Mi</span>
-          <span className="kpi-value">{filteredVenues.length}</span>
-          <span className="kpi-sub">Centered on Ward 1 (Wicker Park / Logan Sq)</span>
-        </div>
-        <div className="kpi-card">
-          <span className="kpi-label">Salt Shed + Milwaukee Ave</span>
-          <span className="kpi-value">
-            {
-              filteredEvents.filter(
-                (e) =>
-                  e.corridor === 'Salt Shed / Elston' || e.corridor === 'Milwaukee Ave Corridor'
-              ).length
-            }
-          </span>
-          <span className="kpi-sub">Shows in core Ward 1 &amp; Elston corridors</span>
-        </div>
-        <div className="kpi-card">
-          <span className="kpi-label">Spotify &amp; Audio Previews</span>
-          <span className="kpi-value">
-            {filteredEvents.filter((e) => e.previewAudioUrl || e.spotifyArtistId).length}
-          </span>
-          <span className="kpi-sub">Instant 30s track previews &amp; artist links</span>
-        </div>
-      </section>
-
       {/* Filter Bar */}
-      <section className="filter-bar">
-        <div className="filter-row">
+      <section className="toolbar">
+        <div className="toolbar-top">
           <div className="search-box">
             <Search size={16} className="search-icon" />
             <input
-              type="text"
-              placeholder="Search artist, opener, venue (e.g. Salt Shed, Brutalismus 3000, Empty Bottle)..."
+              type="search"
+              placeholder="Search artist, venue or genre"
+              aria-label="Search artist, venue or genre"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
+            {searchQuery && (
+              <button className="search-clear" onClick={() => setSearchQuery('')} aria-label="Clear search">
+                <X size={15} />
+              </button>
+            )}
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <label style={{ fontSize: '0.8rem', color: '#94a3b8', fontWeight: 600 }}>
-              Ward 1 Radius: <strong>{maxDistance} mi</strong>
-            </label>
-            <input
-              type="range"
-              min={1}
-              max={10}
-              step={0.5}
-              value={maxDistance}
-              onChange={(e) => setMaxDistance(parseFloat(e.target.value))}
-              style={{ accentColor: '#f97316', cursor: 'pointer' }}
-            />
-          </div>
-
-          <div style={{ display: 'flex', gap: 6 }}>
+          <div className="view-switch" role="tablist" aria-label="View">
             <button
-              className={`btn ${viewMode === 'month' ? 'btn-primary' : ''}`}
+              role="tab"
+              aria-selected={viewMode === 'month'}
+              className={viewMode === 'month' ? 'active' : ''}
               onClick={() => setViewMode('month')}
             >
-              <CalendarIcon size={15} /> Month Grid
+              <CalendarIcon size={15} /> Calendar
             </button>
             <button
-              className={`btn ${viewMode === 'agenda' ? 'btn-primary' : ''}`}
+              role="tab"
+              aria-selected={viewMode === 'agenda'}
+              className={viewMode === 'agenda' ? 'active' : ''}
               onClick={() => setViewMode('agenda')}
             >
-              <List size={15} /> Daily Lineup
+              <List size={15} /> Lineup
             </button>
             <button
-              className={`btn ${viewMode === 'radar' ? 'btn-primary' : ''}`}
+              role="tab"
+              aria-selected={viewMode === 'radar'}
+              className={viewMode === 'radar' ? 'active' : ''}
               onClick={() => setViewMode('radar')}
             >
-              <Compass size={15} /> Ward 1 Radar Map
+              <Compass size={15} /> Map
             </button>
           </div>
         </div>
 
-        {/* Corridor Pills */}
-        <div className="corridor-pills">
-          {CORRIDORS.map((corr) => (
-            <button
-              key={corr}
-              className={`pill ${selectedCorridor === corr ? 'active' : ''}`}
-              onClick={() => {
-                setSelectedCorridor(corr);
-                setSelectedVenueIds([]);
-              }}
-            >
-              {corr === 'ALL' ? 'All Ward 1 Corridors (≤10 mi)' : corr}
-            </button>
-          ))}
+        <div className="filter-group">
+          <span className="filter-label">Genre</span>
+          <div className="chip-row">
+            {[...GENRE_FAMILIES, OTHER_GENRE].map((g) => {
+              const count = genreCounts[g.id] || 0;
+              const active = selectedGenres.includes(g.id);
+              if (count === 0 && !active) return null;
+              return (
+                <button
+                  key={g.id}
+                  className={`pill ${active ? 'active' : ''}`}
+                  style={{ '--chip-color': g.color } as React.CSSProperties}
+                  aria-pressed={active}
+                  onClick={() => toggleGenreFilter(g.id)}
+                >
+                  <span className="dot" style={{ backgroundColor: g.color }} />
+                  {g.label}
+                  <span className="count">{count}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        {/* Venue Filter Chips */}
-        <div className="venue-chips-scroll">
-          {filteredVenues.map((v) => {
-            const active = selectedVenueIds.includes(v.id);
-            const count = filteredEvents.filter((e) => e.venueId === v.id).length;
-            return (
+        <div className="filter-group">
+          <span className="filter-label">Area</span>
+          <div className="chip-row">
+            {CORRIDORS.map((corr) => (
               <button
-                key={v.id}
-                className={`venue-chip ${active ? 'active' : ''}`}
-                onClick={() => toggleVenueFilter(v.id)}
-                title={`${v.name} • ${v.address} (${v.distanceMiles} mi from Ward 1)`}
+                key={corr}
+                className={`pill ${selectedCorridor === corr ? 'active' : ''}`}
+                aria-pressed={selectedCorridor === corr}
+                onClick={() => {
+                  setSelectedCorridor(corr);
+                  setSelectedVenueIds([]);
+                }}
               >
-                <span className="venue-dot" style={{ backgroundColor: v.color }} />
-                <span>{v.shortName}</span>
-                <span style={{ opacity: 0.6, fontSize: '0.7rem' }}>
-                  {v.distanceMiles}mi ({count})
-                </span>
+                {corr === 'ALL' ? 'Everywhere' : corr}
               </button>
-            );
-          })}
-          {selectedVenueIds.length > 0 && (
+            ))}
+          </div>
+        </div>
+
+        <div className="filter-group">
+          <span className="filter-label">Venues</span>
+          <div className="venue-controls">
             <button
-              className="venue-chip"
-              style={{ color: '#f97316', borderColor: '#f97316' }}
-              onClick={() => setSelectedVenueIds([])}
+              className={`pill ${selectedVenueIds.length > 0 ? 'active' : ''}`}
+              aria-expanded={venuesOpen}
+              onClick={() => setVenuesOpen((o) => !o)}
             >
-              Clear Venue Filter
+              {selectedVenueIds.length > 0
+                ? `${selectedVenueIds.length} selected`
+                : `All ${filteredVenues.length} venues`}
+              <ChevronDown size={14} className={venuesOpen ? 'flip' : ''} />
+            </button>
+            <label className="distance-control">
+              <span>
+                Within <strong>{maxDistance} mi</strong>
+              </span>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                step={0.5}
+                value={maxDistance}
+                onChange={(e) => setMaxDistance(parseFloat(e.target.value))}
+              />
+            </label>
+          </div>
+        </div>
+
+        {venuesOpen && (
+          <div className="venue-chips">
+            {filteredVenues.map((v) => {
+              const active = selectedVenueIds.includes(v.id);
+              return (
+                <button
+                  key={v.id}
+                  className={`venue-chip ${active ? 'active' : ''}`}
+                  aria-pressed={active}
+                  onClick={() => toggleVenueFilter(v.id)}
+                  title={`${v.name} • ${v.address} (${v.distanceMiles} mi from Ward 1)`}
+                >
+                  <span className="dot" style={{ backgroundColor: v.color }} />
+                  {v.shortName}
+                  <span className="count">{venueCounts[v.id] || 0}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="filter-summary">
+          <span>
+            <strong>{filteredEvents.length}</strong> {filteredEvents.length === 1 ? 'show' : 'shows'}
+            {activeFilterCount > 0 ? ' match' : ' coming up'}
+          </span>
+          {activeFilterCount > 0 && (
+            <button className="link-btn" onClick={clearFilters}>
+              <X size={13} /> Clear filters
             </button>
           )}
         </div>
       </section>
 
-      {/* Workspace: Calendar / Agenda / Radar + Daily Inspector */}
-      <div className="main-workspace">
+      {/* Workspace: Calendar / Agenda / Radar + Daily Lineup */}
+      <div className={`main-workspace ${viewMode === 'agenda' ? 'single' : ''}`}>
         <div className="calendar-panel">
           {viewMode === 'month' && (
             <>
               <div className="calendar-nav">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <button className="btn" onClick={() => changeMonth(-1)}>
-                    <ChevronLeft size={16} />
+                <div className="month-stepper">
+                  <button className="btn btn-icon" onClick={() => changeMonth(-1)} aria-label="Previous month">
+                    <ChevronLeft size={18} />
                   </button>
                   <h2 className="month-title">{monthLabel}</h2>
-                  <button className="btn" onClick={() => changeMonth(1)}>
-                    <ChevronRight size={16} />
+                  <button className="btn btn-icon" onClick={() => changeMonth(1)} aria-label="Next month">
+                    <ChevronRight size={18} />
                   </button>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setCurrentMonth({ year: 2026, month: 10 });
-                      setSelectedDate('2026-11-13');
-                    }}
-                  >
-                    Today (Nov 13)
-                  </button>
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setCurrentMonth({ year: 2026, month: 11 });
-                      setSelectedDate('2026-12-01');
-                    }}
-                  >
-                    Dec 2026
-                  </button>
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setCurrentMonth({ year: 2027, month: 0 });
-                      setSelectedDate('2027-01-01');
-                    }}
-                  >
-                    Jan 2027
-                  </button>
-                </div>
+                <button className="btn" onClick={() => goToDate(today)}>
+                  Today
+                </button>
               </div>
 
               <div className="weekday-header">
@@ -547,44 +769,53 @@ export default function App() {
                 {calendarDays.map((cell) => {
                   const dayEvents = eventsByDate[cell.dateStr] || [];
                   const isSelected = selectedDate === cell.dateStr;
-                  const isToday = cell.dateStr === '2026-11-13';
-                  const visibleBadges = dayEvents.slice(0, 4);
-                  const hiddenCount = Math.max(0, dayEvents.length - visibleBadges.length);
+                  const isToday = cell.dateStr === today;
+                  const visibleBadges = dayEvents.slice(0, 3);
+                  const hiddenCount = dayEvents.length - visibleBadges.length;
 
                   return (
-                    <div
+                    <button
                       key={cell.dateStr}
                       className={`day-cell ${!cell.inMonth ? 'outside-month' : ''} ${
                         isSelected ? 'selected-day' : ''
-                      } ${isToday ? 'today' : ''}`}
-                      onClick={() => setSelectedDate(cell.dateStr)}
+                      } ${isToday ? 'today' : ''} ${cell.dateStr < today ? 'past' : ''}`}
+                      aria-label={`${formatDate(cell.dateStr, { month: 'long', day: 'numeric' })}, ${
+                        dayEvents.length
+                      } shows`}
+                      aria-pressed={isSelected}
+                      onClick={() => selectDay(cell.dateStr)}
                     >
-                      <div className="day-cell-header">
+                      <span className="day-cell-header">
                         <span className="day-number">{cell.dayNum}</span>
                         {dayEvents.length > 0 && (
-                          <span className="day-show-count">{dayEvents.length} shows</span>
+                          <span className="day-show-count">
+                            {dayEvents.length}
+                            <span className="day-show-word"> {dayEvents.length === 1 ? 'show' : 'shows'}</span>
+                          </span>
                         )}
-                      </div>
+                      </span>
 
                       {visibleBadges.map((ev) => (
-                        <div
+                        <span
                           key={ev.id}
                           className="event-badge"
                           style={{ borderLeftColor: ev.venueColor }}
-                          title={`${ev.headliner} @ ${ev.venueName} (${ev.time})`}
                         >
-                          <div className="event-badge-artist">{ev.headliner}</div>
-                          <div className="event-badge-venue">
-                            <span>{ev.venueShort}</span>
-                            {ev.previewAudioUrl && <Headphones size={10} color="#4ade80" />}
-                          </div>
-                        </div>
+                          <span className="event-badge-artist">{ev.headliner}</span>
+                          <span className="event-badge-venue">{ev.venueShort}</span>
+                        </span>
                       ))}
+                      {hiddenCount > 0 && <span className="more-shows-pill">+{hiddenCount} more</span>}
 
-                      {hiddenCount > 0 && (
-                        <div className="more-shows-pill">+{hiddenCount} more shows</div>
+                      {/* Compact marker row used instead of badges on small screens */}
+                      {dayEvents.length > 0 && (
+                        <span className="day-dots">
+                          {visibleBadges.map((ev) => (
+                            <span key={ev.id} className="dot" style={{ backgroundColor: ev.venueColor }} />
+                          ))}
+                        </span>
                       )}
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -593,339 +824,172 @@ export default function App() {
 
           {viewMode === 'agenda' && (
             <div className="agenda-list">
-              {Object.entries(eventsByDate)
-                .slice(0, 45)
-                .map(([dateStr, dayEvs]) => {
-                  const formatted = new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', {
-                    weekday: 'long',
-                    month: 'short',
-                    day: 'numeric',
-                    year: 'numeric',
-                  });
-                  return (
-                    <div key={dateStr} className="agenda-day-group">
-                      <div className="agenda-day-header">
-                        <span>{formatted}</span>
-                        <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
-                          {dayEvs.length} {dayEvs.length === 1 ? 'show' : 'shows'}
-                        </span>
-                      </div>
-                      <div className="agenda-cards-grid">
-                        {dayEvs.map((ev) => (
-                          <div
-                            key={ev.id}
-                            className="sidebar-show-card"
-                            onClick={() => setSelectedDate(ev.date)}
-                          >
-                            <div className="show-card-top">
-                              {ev.imageUrl ? (
-                                <img src={ev.imageUrl} alt={ev.headliner} className="show-thumb" />
-                              ) : (
-                                <div
-                                  className="show-thumb"
-                                  style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                  }}
-                                >
-                                  <Music size={22} color={ev.venueColor} />
-                                </div>
-                              )}
-                              <div>
-                                <div className="show-headline">{ev.headliner}</div>
-                                {ev.support.length > 0 && (
-                                  <div className="show-support">
-                                    w/ {ev.support.slice(0, 3).join(', ')}
-                                  </div>
-                                )}
-                                <div
-                                  style={{
-                                    fontSize: '0.76rem',
-                                    color: ev.venueColor,
-                                    fontWeight: 700,
-                                    marginTop: 3,
-                                  }}
-                                >
-                                  {ev.venueName} ({ev.distanceMiles} mi)
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+              {sortedDates.length === 0 && (
+                <div className="empty-state">
+                  No shows match these filters.
+                  <button className="link-btn" onClick={clearFilters}>
+                    Clear filters
+                  </button>
+                </div>
+              )}
+              {sortedDates.slice(0, agendaDays).map((dateStr) => {
+                const dayEvs = eventsByDate[dateStr];
+                return (
+                  <section key={dateStr} className="agenda-day-group">
+                    <h3 className="agenda-day-header">
+                      <span>
+                        {dateStr === today
+                          ? 'Tonight · '
+                          : ''}
+                        {formatDate(dateStr, { weekday: 'long', month: 'short', day: 'numeric' })}
+                      </span>
+                      <span className="agenda-day-count">
+                        {dayEvs.length} {dayEvs.length === 1 ? 'show' : 'shows'}
+                      </span>
+                    </h3>
+                    <div className="agenda-cards-grid">
+                      {dayEvs.map((ev) => (
+                        <ShowCard
+                          key={ev.id}
+                          ev={ev}
+                          isPlaying={playingEventId === ev.id}
+                          embedOpen={activeSpotifyEmbed === ev.id}
+                          {...cardProps}
+                        />
+                      ))}
                     </div>
-                  );
-                })}
+                  </section>
+                );
+              })}
+              {sortedDates.length > agendaDays && (
+                <button className="btn load-more" onClick={() => setAgendaDays((n) => n + AGENDA_PAGE_DAYS)}>
+                  Show more days
+                </button>
+              )}
             </div>
           )}
 
-          {viewMode === 'radar' && data && (
+          {viewMode === 'radar' && (
             <div className="radar-container">
-              <div style={{ textAlign: 'center', maxWidth: 640 }}>
-                <h3 style={{ fontFamily: 'Space Grotesk', fontSize: '1.3rem' }}>
-                  Ward 1 Live Music Spatial Radar (10-Mile Radius)
-                </h3>
-                <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginTop: 4 }}>
-                  Centered at Wicker Park / Logan Square (41.9080°N, 87.6790°W). Click any venue pin
-                  to filter the calendar to that stage.
-                </p>
+              <div className="radar-intro">
+                <h3>Venues around Ward 1</h3>
+                <p>Rings mark every 2 miles from Wicker Park / Logan Square. Tap a venue to filter the calendar.</p>
               </div>
 
-              <svg
-                width="680"
-                height="520"
-                viewBox="0 0 680 520"
-                style={{
-                  background: '#0b0f19',
-                  borderRadius: 16,
-                  border: '1px solid rgba(255,255,255,0.1)',
-                  maxWidth: '100%',
-                }}
-              >
-                {/* Radar distance rings (2mi, 4mi, 6mi, 8mi, 10mi) */}
-                {[2, 4, 6, 8, 10].map((mi) => (
-                  <g key={mi}>
-                    <circle
-                      cx={320}
-                      cy={250}
-                      r={mi * 23}
-                      fill="none"
-                      stroke="rgba(255,255,255,0.07)"
-                      strokeDasharray="4 4"
-                    />
-                    <text
-                      x={324}
-                      y={250 - mi * 23 + 12}
-                      fill="#64748b"
-                      fontSize="10"
-                      fontFamily="Inter"
-                    >
-                      {mi} mi
-                    </text>
-                  </g>
-                ))}
-
-                {/* Milwaukee Ave Diagonal Line */}
-                <line
-                  x1={140}
-                  y1={110}
-                  x2={450}
-                  y2={340}
-                  stroke="rgba(16, 185, 129, 0.25)"
-                  strokeWidth={3}
-                />
-                <text x={150} y={102} fill="#10b981" fontSize="11" fontWeight="600">
-                  Milwaukee Ave Corridor
-                </text>
-
-                {/* Ward 1 Center Marker */}
-                <circle cx={320} cy={250} r={6} fill="#f97316" />
-                <circle
-                  cx={320}
-                  cy={250}
-                  r={14}
-                  fill="none"
-                  stroke="#f97316"
-                  strokeOpacity={0.5}
-                />
-                <text x={332} y={254} fill="#fdba74" fontSize="11" fontWeight="700">
-                  WARD 1 CENTER
-                </text>
-
-                {/* Venue Nodes */}
-                {filteredVenues.map((v) => {
-                  const dx = (v.lng - data.wardCenter.lng) * 2400;
-                  const dy = (data.wardCenter.lat - v.lat) * 3100;
-                  const cx = Math.max(40, Math.min(640, 320 + dx));
-                  const cy = Math.max(30, Math.min(490, 250 + dy));
-                  const isSelected = selectedVenueIds.includes(v.id);
-
-                  return (
-                    <g
-                      key={v.id}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => {
-                        toggleVenueFilter(v.id);
-                        setViewMode('month');
-                      }}
-                    >
+              <div className="radar-scroll">
+                <svg viewBox="0 0 680 520" className="radar-svg" role="img" aria-label="Map of venues by distance from Ward 1">
+                  {/* Radar distance rings (2mi, 4mi, 6mi, 8mi, 10mi) */}
+                  {[2, 4, 6, 8, 10].map((mi) => (
+                    <g key={mi}>
                       <circle
-                        cx={cx}
-                        cy={cy}
-                        r={isSelected ? 9 : 6}
-                        fill={v.color}
-                        stroke="#090b10"
-                        strokeWidth={2}
+                        cx={320}
+                        cy={250}
+                        r={mi * 23}
+                        fill="none"
+                        stroke="rgba(255,255,255,0.08)"
+                        strokeDasharray="4 4"
                       />
-                      <text
-                        x={cx + 8}
-                        y={cy + 3}
-                        fill="#e2e8f0"
-                        fontSize="10"
-                        fontWeight="600"
-                      >
-                        {v.shortName} ({v.distanceMiles}m)
+                      <text x={324} y={250 - mi * 23 + 12} fill="#6b7280" fontSize="10">
+                        {mi} mi
                       </text>
                     </g>
-                  );
-                })}
-              </svg>
+                  ))}
+
+                  {/* Milwaukee Ave Diagonal Line */}
+                  <line x1={140} y1={110} x2={450} y2={340} stroke="rgba(16, 185, 129, 0.25)" strokeWidth={3} />
+                  <text x={150} y={102} fill="#10b981" fontSize="11" fontWeight="600">
+                    Milwaukee Ave
+                  </text>
+
+                  {/* Ward 1 Center Marker */}
+                  <circle cx={320} cy={250} r={6} fill="#f97316" />
+                  <circle cx={320} cy={250} r={14} fill="none" stroke="#f97316" strokeOpacity={0.5} />
+                  <text x={332} y={254} fill="#fdba74" fontSize="11" fontWeight="700">
+                    WARD 1
+                  </text>
+
+                  {/* Venue Nodes */}
+                  {filteredVenues.map((v) => {
+                    const dx = (v.lng - data.wardCenter.lng) * 2400;
+                    const dy = (data.wardCenter.lat - v.lat) * 3100;
+                    const cx = Math.max(40, Math.min(640, 320 + dx));
+                    const cy = Math.max(30, Math.min(490, 250 + dy));
+                    const isSelected = selectedVenueIds.includes(v.id);
+
+                    return (
+                      <g
+                        key={v.id}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => {
+                          toggleVenueFilter(v.id);
+                          setViewMode('month');
+                        }}
+                      >
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={isSelected ? 9 : 6}
+                          fill={v.color}
+                          stroke="#0b0b12"
+                          strokeWidth={2}
+                        />
+                        <text x={cx + 9} y={cy + 3} fill="#e5e7eb" fontSize="10" fontWeight="600">
+                          {v.shortName}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Right Sidebar: Selected Date Lineup & Spotify Player */}
-        <aside className="inspector-sidebar">
-          <div className="sidebar-date-banner">
-            <span className="kpi-label">Daily Stage Schedule</span>
-            <h2>
-              {new Date(selectedDate + 'T12:00:00').toLocaleDateString('en-US', {
-                weekday: 'short',
-                month: 'short',
-                day: 'numeric',
-                year: 'numeric',
-              })}
-            </h2>
-            <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: 2 }}>
-              {selectedDayEvents.length}{' '}
-              {selectedDayEvents.length === 1 ? 'concert' : 'concerts'} scheduled within {maxDistance}{' '}
-              miles of Ward 1
-            </p>
-          </div>
-
-          {activeSpotifyEmbed && (
-            <div style={{ marginBottom: 8 }}>
-              <iframe
-                title="Spotify Artist Player"
-                src={`https://open.spotify.com/embed/artist/${activeSpotifyEmbed}?utm_source=generator&theme=0`}
-                width="100%"
-                height="152"
-                frameBorder="0"
-                allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
-                loading="lazy"
-                style={{ borderRadius: 12 }}
-              />
+        {/* Sidebar: selected date lineup */}
+        {viewMode !== 'agenda' && (
+          <aside className="lineup-sidebar" ref={lineupRef}>
+            <div className="lineup-header">
+              <span className="filter-label">{selectedDate === today ? 'Tonight' : 'Lineup'}</span>
+              <h2>{formatDate(selectedDate, { weekday: 'long', month: 'short', day: 'numeric' })}</h2>
+              <p>
+                {selectedDayEvents.length} {selectedDayEvents.length === 1 ? 'show' : 'shows'}
+                {activeFilterCount > 0 ? ' matching your filters' : ''}
+              </p>
             </div>
-          )}
 
-          {selectedDayEvents.length === 0 ? (
-            <div style={{ color: '#64748b', fontSize: '0.88rem', padding: '24px 0' }}>
-              No shows matching your current filter on this date. Click another date in the calendar
-              or clear venue filters.
-            </div>
-          ) : (
-            selectedDayEvents.map((ev) => {
-              const isPlaying = playingEventId === ev.id;
-              return (
-                <div
+            {selectedDayEvents.length === 0 ? (
+              <div className="empty-state">
+                {activeFilterCount > 0 ? 'Nothing matches your filters on this date.' : 'No shows listed on this date.'}
+                {nextDateWithShows && (
+                  <button className="btn" onClick={() => goToDate(nextDateWithShows)}>
+                    Jump to {formatDate(nextDateWithShows, { weekday: 'short', month: 'short', day: 'numeric' })}
+                  </button>
+                )}
+                {activeFilterCount > 0 && (
+                  <button className="link-btn" onClick={clearFilters}>
+                    Clear filters
+                  </button>
+                )}
+              </div>
+            ) : (
+              selectedDayEvents.map((ev) => (
+                <ShowCard
                   key={ev.id}
-                  className="sidebar-show-card"
-                  style={{ borderLeft: `4px solid ${ev.venueColor}` }}
-                >
-                  <div className="show-card-top">
-                    {ev.imageUrl ? (
-                      <img src={ev.imageUrl} alt={ev.headliner} className="show-thumb" />
-                    ) : (
-                      <div
-                        className="show-thumb"
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                        }}
-                      >
-                        <Music size={22} color={ev.venueColor} />
-                      </div>
-                    )}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="show-headline">{ev.headliner}</div>
-                      {ev.support.length > 0 && (
-                        <div className="show-support">w/ {ev.support.join(', ')}</div>
-                      )}
-                      <div
-                        style={{
-                          fontSize: '0.78rem',
-                          fontWeight: 700,
-                          color: ev.venueColor,
-                          marginTop: 4,
-                        }}
-                      >
-                        {ev.venueName} • {ev.distanceMiles} mi
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="show-meta-grid">
-                    <span className="meta-tag">{ev.time}</span>
-                    <span className="meta-tag">{ev.corridor}</span>
-                    {ev.price && <span className="meta-tag">{ev.price}</span>}
-                    <span className="meta-tag">{ev.genre}</span>
-                    <span className="meta-tag">{ev.source}</span>
-                  </div>
-
-                  {ev.previewTrackTitle && (
-                    <div
-                      style={{
-                        fontSize: '0.73rem',
-                        color: '#4ade80',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 6,
-                      }}
-                    >
-                      <Headphones size={12} /> Top Track: {ev.previewTrackTitle}
-                    </div>
-                  )}
-
-                  <div className="show-actions">
-                    {ev.previewAudioUrl && (
-                      <button
-                        className="btn btn-spotify"
-                        onClick={() => toggleAudioPreview(ev)}
-                      >
-                        {isPlaying ? <Pause size={13} /> : <Play size={13} />}
-                        {isPlaying ? 'Pause 30s' : 'Preview 30s'}
-                      </button>
-                    )}
-
-                    {ev.spotifyArtistId ? (
-                      <button
-                        className="btn btn-spotify"
-                        onClick={() =>
-                          setActiveSpotifyEmbed(
-                            activeSpotifyEmbed === ev.spotifyArtistId ? null : ev.spotifyArtistId
-                          )
-                        }
-                      >
-                        <Headphones size={13} /> Spotify Embed
-                      </button>
-                    ) : (
-                      <a
-                        className="btn btn-spotify"
-                        href={ev.spotifyUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        <ExternalLink size={13} /> Spotify
-                      </a>
-                    )}
-
-                    <a
-                      className="btn"
-                      href={ev.ticketUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <Ticket size={13} /> Tickets
-                    </a>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </aside>
+                  ev={ev}
+                  isPlaying={playingEventId === ev.id}
+                  embedOpen={activeSpotifyEmbed === ev.id}
+                  {...cardProps}
+                />
+              ))
+            )}
+          </aside>
+        )}
       </div>
+
+      <footer className="site-footer">
+        Listings pulled from Ticketmaster, TicketWeb, DICE and venue sites. Check the venue before you
+        head out.
+      </footer>
     </div>
   );
 }
