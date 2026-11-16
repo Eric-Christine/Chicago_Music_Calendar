@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { GENRE_FAMILIES, OTHER_GENRE, genreFamily, genreFamilyIds } from './genres';
+import { fetchDeezerPreviewUrl, silentClip } from './preview';
 
 export interface Venue {
   id: string;
@@ -63,6 +64,7 @@ export interface MusicEvent {
   spotifyArtistId: string | null;
   spotifyTrackUrl: string | null;
   previewAudioUrl: string | null;
+  previewTrackId?: number | null; // Deezer track, resolved to an audio URL at play time
   previewTrackTitle: string | null;
   artistFans?: number | null;
 }
@@ -81,6 +83,7 @@ interface CalendarPayload {
 }
 
 type ViewMode = 'month' | 'agenda' | 'radar';
+type PreviewStatus = 'idle' | 'loading' | 'playing' | 'error';
 
 const CORRIDORS = [
   'ALL',
@@ -128,7 +131,7 @@ function ShowThumb({ ev }: { ev: MusicEvent }) {
 
 interface ShowCardProps {
   ev: MusicEvent;
-  isPlaying: boolean;
+  previewStatus: PreviewStatus;
   embedOpen: boolean;
   activeGenres: string[];
   onTogglePreview: (ev: MusicEvent) => void;
@@ -138,7 +141,7 @@ interface ShowCardProps {
 
 function ShowCard({
   ev,
-  isPlaying,
+  previewStatus,
   embedOpen,
   activeGenres,
   onTogglePreview,
@@ -203,10 +206,20 @@ function ShowCard({
       )}
 
       <div className="show-actions">
-        {ev.previewAudioUrl && (
-          <button className="btn btn-spotify" onClick={() => onTogglePreview(ev)}>
-            {isPlaying ? <Pause size={14} /> : <Play size={14} />}
-            {isPlaying ? 'Pause' : 'Preview'}
+        {(ev.previewAudioUrl || ev.previewTrackId) && (
+          <button
+            className="btn btn-spotify"
+            onClick={() => onTogglePreview(ev)}
+            disabled={previewStatus === 'error'}
+          >
+            {previewStatus === 'playing' ? <Pause size={14} /> : <Play size={14} />}
+            {previewStatus === 'playing'
+              ? 'Pause'
+              : previewStatus === 'loading'
+              ? 'Loading…'
+              : previewStatus === 'error'
+              ? 'Unavailable'
+              : 'Preview'}
           </button>
         )}
         {ev.spotifyArtistId ? (
@@ -250,9 +263,11 @@ export default function App() {
   const [activeSpotifyEmbed, setActiveSpotifyEmbed] = useState<string | null>(null);
   const lineupRef = useRef<HTMLElement | null>(null);
 
-  // Audio player for 30s track previews
-  const [playingEventId, setPlayingEventId] = useState<string | null>(null);
+  // Audio player for 30s track previews. One element is reused so a tap-unlocked
+  // element stays unlocked on mobile browsers.
+  const [preview, setPreview] = useState<{ id: string; status: PreviewStatus } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const previewRequest = useRef(0);
 
   useEffect(() => {
     loadCalendarData();
@@ -290,20 +305,34 @@ export default function App() {
     }
   }
 
-  function toggleAudioPreview(ev: MusicEvent) {
-    if (!ev.previewAudioUrl) return;
-    if (playingEventId === ev.id) {
-      audioRef.current?.pause();
-      setPlayingEventId(null);
-    } else {
-      if (audioRef.current) {
-        audioRef.current.pause();
+  async function toggleAudioPreview(ev: MusicEvent) {
+    const audio = audioRef.current ?? (audioRef.current = new Audio());
+    const request = ++previewRequest.current;
+    audio.onended = null;
+    audio.pause();
+
+    if (preview?.id === ev.id && preview.status !== 'error') {
+      setPreview(null);
+      return;
+    }
+
+    setPreview({ id: ev.id, status: 'loading' });
+    try {
+      let url = ev.previewAudioUrl;
+      if (!url && ev.previewTrackId) {
+        audio.src = silentClip();
+        audio.play().catch(() => {});
+        url = await fetchDeezerPreviewUrl(ev.previewTrackId);
       }
-      const audio = new Audio(ev.previewAudioUrl);
-      audio.onended = () => setPlayingEventId(null);
-      audio.play().catch(() => setPlayingEventId(null));
-      audioRef.current = audio;
-      setPlayingEventId(ev.id);
+      if (request !== previewRequest.current) return;
+      if (!url) throw new Error('No preview');
+      audio.src = url;
+      audio.onended = () => setPreview(null);
+      await audio.play();
+      if (request === previewRequest.current) setPreview({ id: ev.id, status: 'playing' });
+    } catch (err) {
+      console.error('Preview failed:', err);
+      if (request === previewRequest.current) setPreview({ id: ev.id, status: 'error' });
     }
   }
 
@@ -463,7 +492,7 @@ export default function App() {
   const nextDateWithShows = sortedDates.find((d) => d > selectedDate) || sortedDates[0];
   const tonightCount = (eventsByDate[today] || []).length;
   const previewCount = useMemo(
-    () => filteredEvents.filter((e) => e.previewAudioUrl || e.spotifyArtistId).length,
+    () => filteredEvents.filter((e) => e.previewAudioUrl || e.previewTrackId).length,
     [filteredEvents]
   );
 
@@ -852,7 +881,7 @@ export default function App() {
                         <ShowCard
                           key={ev.id}
                           ev={ev}
-                          isPlaying={playingEventId === ev.id}
+                          previewStatus={preview?.id === ev.id ? preview.status : 'idle'}
                           embedOpen={activeSpotifyEmbed === ev.id}
                           {...cardProps}
                         />
@@ -976,7 +1005,7 @@ export default function App() {
                 <ShowCard
                   key={ev.id}
                   ev={ev}
-                  isPlaying={playingEventId === ev.id}
+                  previewStatus={preview?.id === ev.id ? preview.status : 'idle'}
                   embedOpen={activeSpotifyEmbed === ev.id}
                   {...cardProps}
                 />

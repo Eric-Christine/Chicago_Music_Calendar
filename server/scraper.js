@@ -798,6 +798,48 @@ function deduplicateEvents(allEvents) {
   );
 }
 
+// Deezer allows 50 requests per 5 seconds; each artist lookup is two requests
+const DEEZER_BATCH_SIZE = 8;
+const DEEZER_BATCH_PAUSE_MS = 2000;
+const ARTIST_LOOKUP_LIMIT = Number(process.env.ARTIST_LOOKUP_LIMIT) || 120;
+
+async function deezerJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Deezer HTTP ${res.status}`);
+  const data = await res.json();
+  // Quota errors come back as HTTP 200 with an error body
+  if (data.error) throw new Error(data.error.message || 'Deezer error');
+  return data;
+}
+
+function artistNameKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/^the\s+/, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+async function lookupDeezerArtist(artistName) {
+  const search = await deezerJson(
+    `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=1`
+  );
+  const artist = search.data?.[0];
+  // Search always returns its closest guess, so require the name to actually match
+  if (!artist || artistNameKey(artist.name) !== artistNameKey(artistName)) {
+    return { notFound: true };
+  }
+  const top = await deezerJson(`https://api.deezer.com/artist/${artist.id}/top?limit=1`);
+  const topTrack = top.data?.[0];
+  return {
+    artistImage: artist.picture_big || artist.picture_medium || null,
+    fans: artist.nb_fan || 0,
+    topTrackTitle: topTrack ? `${artist.name} – ${topTrack.title}` : null,
+    // Deezer preview URLs are signed and expire within minutes, so only the track id is kept;
+    // the browser asks Deezer for a fresh URL when someone presses play
+    previewTrackId: topTrack?.preview ? topTrack.id : null,
+  };
+}
+
 async function enrichArtistsWithPreviews(events) {
   let artistCache = {};
   try {
@@ -813,40 +855,22 @@ async function enrichArtistsWithPreviews(events) {
         .filter((e) => !e.previewAudioUrl && e.headliner && !artistCache[e.headliner.toLowerCase()])
         .map((e) => e.headliner)
     ),
-  ].slice(0, 50);
+  ].slice(0, ARTIST_LOOKUP_LIMIT);
 
   let updatedCache = false;
-  await Promise.all(
-    uncachedHeadliners.map(async (artistName) => {
-      const key = artistName.toLowerCase();
-      try {
-        const res = await fetch(
-          `https://api.deezer.com/search/artist?q=${encodeURIComponent(artistName)}&limit=1`
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        const artist = data.data?.[0];
-        if (!artist) {
-          artistCache[key] = { notFound: true };
+  for (let i = 0; i < uncachedHeadliners.length; i += DEEZER_BATCH_SIZE) {
+    if (i > 0) await new Promise((resolve) => setTimeout(resolve, DEEZER_BATCH_PAUSE_MS));
+    await Promise.all(
+      uncachedHeadliners.slice(i, i + DEEZER_BATCH_SIZE).map(async (artistName) => {
+        try {
+          artistCache[artistName.toLowerCase()] = await lookupDeezerArtist(artistName);
           updatedCache = true;
-          return;
+        } catch {
+          // Leave uncached so the next sync retries
         }
-        const topRes = await fetch(`https://api.deezer.com/artist/${artist.id}/top?limit=1`);
-        const topData = topRes.ok ? await topRes.json() : {};
-        const topTrack = topData.data?.[0];
-
-        artistCache[key] = {
-          artistImage: artist.picture_big || artist.picture_medium || null,
-          fans: artist.nb_fan || 0,
-          topTrackTitle: topTrack ? `${artist.name} – ${topTrack.title}` : null,
-          previewUrl: topTrack?.preview || null,
-        };
-        updatedCache = true;
-      } catch {
-        // ignore network errors
-      }
-    })
-  );
+      })
+    );
+  }
 
   if (updatedCache) {
     try {
@@ -859,8 +883,8 @@ async function enrichArtistsWithPreviews(events) {
   for (const ev of events) {
     const cached = artistCache[ev.headliner?.toLowerCase()];
     if (cached && !cached.notFound) {
-      if (!ev.previewAudioUrl && cached.previewUrl) {
-        ev.previewAudioUrl = cached.previewUrl;
+      if (!ev.previewAudioUrl && cached.previewTrackId) {
+        ev.previewTrackId = cached.previewTrackId;
         ev.previewTrackTitle = cached.topTrackTitle;
       }
       if (!ev.imageUrl && cached.artistImage) {
