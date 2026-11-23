@@ -9,4 +9,4 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
 const data = JSON.parse(await fs.readFile(path.join(PUBLIC_DIR, 'events_snapshot.json'), 'utf-8'));
 await fs.writeFile(path.join(PUBLIC_DIR, 'calendar.ics'), buildIcs(data));
-console.log(`Wrote calendar.ics with ${Math.min(data.events.length, 500)} events`);
+console.log(`Wrote calendar.ics with ${Math.min(data.events.length, 2000)} events`);

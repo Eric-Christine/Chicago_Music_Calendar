@@ -25,7 +25,7 @@ export function buildIcs(data, { venueFilter = null, corridorFilter = null } = {
     'X-WR-TIMEZONE:America/Chicago',
   ];
 
-  for (const ev of events.slice(0, 500)) {
+  for (const ev of events.slice(0, 2000)) {
     const dateCompact = ev.date.replace(/-/g, '');
     const desc = [
       `Headliner: ${ev.headliner}`,

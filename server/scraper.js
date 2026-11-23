@@ -39,13 +39,23 @@ function decodeEntities(str) {
     .trim();
 }
 
-const NOW_CHICAGO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+function getChicagoToday() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+}
 
-export function normalizeDateString(
-  raw,
-  referenceYear = Number(NOW_CHICAGO.slice(0, 4)),
-  referenceMonth = Number(NOW_CHICAGO.slice(5, 7))
-) {
+function getTwelveMonthHorizon() {
+  const now = new Date();
+  const end = new Date(now);
+  end.setFullYear(end.getFullYear() + 1);
+  return {
+    startDate: getChicagoToday(),
+    endDate: end.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' }),
+    startIso: now.toISOString().split('.')[0] + 'Z',
+    endIso: end.toISOString().split('.')[0] + 'Z',
+  };
+}
+
+export function normalizeDateString(raw, referenceDate = getChicagoToday()) {
   if (!raw) return null;
   const clean = raw.replace(/\s+/g, ' ').trim();
 
@@ -61,11 +71,16 @@ export function normalizeDateString(
     const month = MONTHS[mKey];
     if (month) {
       const day = String(mMatch[2]).padStart(2, '0');
-      let year = mMatch[3] ? Number(mMatch[3]) : referenceYear;
+      const refYear = Number(referenceDate.slice(0, 4));
+      let year = mMatch[3] ? Number(mMatch[3]) : refYear;
       if (!mMatch[3]) {
-        const mNum = Number(month);
-        if (referenceMonth >= 10 && mNum <= 4) {
-          year = referenceYear + 1;
+        // Without an explicit year, any date more than 3 days before today belongs to next year
+        const candidate = `${year}-${month}-${day}`;
+        const cutoff = new Date(`${referenceDate}T12:00:00Z`);
+        cutoff.setUTCDate(cutoff.getUTCDate() - 3);
+        const cutoffStr = cutoff.toISOString().slice(0, 10);
+        if (candidate < cutoffStr) {
+          year = refYear + 1;
         }
       }
       return `${year}-${month}-${day}`;
@@ -93,9 +108,10 @@ function format24To12(timeStr) {
   return `${h}:${mStr} ${ampm}`;
 }
 
-// 1. Ticketmaster & TicketWeb Discovery API
+// 1. Ticketmaster & TicketWeb Discovery API (paginated across the next 12 months)
 async function fetchTicketmasterEvents() {
   const events = [];
+  const { startIso, endIso } = getTwelveMonthHorizon();
   const keyGroups = {};
   for (const v of VENUES) {
     if (v.tmVenueIds?.length && v.tmApiKey) {
@@ -107,180 +123,214 @@ async function fetchTicketmasterEvents() {
   }
 
   for (const [apiKey, list] of Object.entries(keyGroups)) {
-    const chunkSize = 12;
+    // Smaller chunks + pagination ensure no busy venue truncates before the 12-month horizon
+    const chunkSize = 4;
     for (let i = 0; i < list.length; i += chunkSize) {
       const slice = list.slice(i, i + chunkSize);
       const venueIdsParam = slice.map((s) => s.tmId).join(',');
-      const url = `https://app.ticketmaster.com/discovery/v2/events.json?apikey=${apiKey}&venueId=${venueIdsParam}&size=200&sort=date,asc`;
-      try {
-        const res = await fetch(url);
-        if (!res.ok) continue;
-        const data = await res.json();
-        const rawEvents = data._embedded?.events || [];
-        for (const ev of rawEvents) {
-          if (ev.dates?.status?.code === 'cancelled') continue;
-          const tmVenueId = ev._embedded?.venues?.[0]?.id;
-          const matched = slice.find((s) => s.tmId === tmVenueId) || slice[0];
-          const venue = matched.venue;
-          const date = ev.dates?.start?.localDate;
-          if (!date) continue;
+      let page = 0;
+      let totalPages = 1;
 
-          const attractions = ev._embedded?.attractions || [];
-          const primaryAttr = attractions[0];
-          const headliner = primaryAttr?.name || cleanArtistName(ev.name);
-          const support = attractions.slice(1).map((a) => a.name);
+      while (page < totalPages && page < 5) {
+        const url = `https://app.ticketmaster.com/discovery/v2/events.json?apikey=${apiKey}&venueId=${venueIdsParam}&startDateTime=${encodeURIComponent(startIso)}&endDateTime=${encodeURIComponent(endIso)}&size=200&page=${page}&sort=date,asc`;
+        try {
+          if (i > 0 || page > 0) await new Promise((r) => setTimeout(r, 220));
+          const res = await fetch(url);
+          if (!res.ok) break;
+          const data = await res.json();
+          totalPages = Math.min(data.page?.totalPages || 1, 5);
+          const rawEvents = data._embedded?.events || [];
+          if (rawEvents.length === 0) break;
 
-          const spotifyUrl =
-            primaryAttr?.externalLinks?.spotify?.[0]?.url ||
-            `https://open.spotify.com/search/${encodeURIComponent(headliner)}`;
+          for (const ev of rawEvents) {
+            if (ev.dates?.status?.code === 'cancelled') continue;
+            const tmVenueId = ev._embedded?.venues?.[0]?.id;
+            const matched = slice.find((s) => s.tmId === tmVenueId) || slice[0];
+            const venue = matched.venue;
+            const date = ev.dates?.start?.localDate;
+            if (!date) continue;
 
-          let spotifyArtistId = null;
-          const spMatch = spotifyUrl.match(/open\.spotify\.com\/artist\/([a-zA-Z0-9]+)/);
-          if (spMatch) spotifyArtistId = spMatch[1];
+            const attractions = ev._embedded?.attractions || [];
+            const primaryAttr = attractions[0];
+            const headliner = primaryAttr?.name || cleanArtistName(ev.name);
+            const support = attractions.slice(1).map((a) => a.name);
 
-          const imgObj =
-            ev.images?.find((im) => im.ratio === '16_9' && im.width >= 600) ||
-            ev.images?.[0];
+            const spotifyUrl =
+              primaryAttr?.externalLinks?.spotify?.[0]?.url ||
+              `https://open.spotify.com/search/${encodeURIComponent(headliner)}`;
 
-          const genre =
-            ev.classifications?.[0]?.subGenre?.name ||
-            ev.classifications?.[0]?.genre?.name ||
-            'Live Music';
+            let spotifyArtistId = null;
+            const spMatch = spotifyUrl.match(/open\.spotify\.com\/artist\/([a-zA-Z0-9]+)/);
+            if (spMatch) spotifyArtistId = spMatch[1];
 
-          const priceRange = ev.priceRanges?.[0];
-          const priceStr = priceRange
-            ? `$${Math.round(priceRange.min)}${priceRange.max && priceRange.max !== priceRange.min ? `–$${Math.round(priceRange.max)}` : ''}`
-            : null;
+            const imgObj =
+              ev.images?.find((im) => im.ratio === '16_9' && im.width >= 600) ||
+              ev.images?.[0];
 
-          events.push({
-            id: `tm-${ev.id}`,
-            title: ev.name,
-            headliner,
-            support,
-            date,
-            time: ev.dates?.start?.localTime ? format24To12(ev.dates.start.localTime) : '8:00 PM',
-            venueId: venue.id,
-            venueName: venue.name,
-            venueShort: venue.shortName,
-            corridor: venue.corridor,
-            neighborhood: venue.neighborhood,
-            address: venue.address,
-            distanceMiles: venue.distanceMiles,
-            lat: venue.lat,
-            lng: venue.lng,
-            venueColor: venue.color,
-            ticketUrl: ev.url || venue.website,
-            imageUrl: imgObj?.url || null,
-            genre: genre === 'Undefined' ? 'Alternative / Indie' : genre,
-            price: priceStr,
-            ageRestriction: ev.ageRestrictions?.legalAgeEnforced ? '21+' : '18+ / All Ages',
-            soldOut: ev.dates?.status?.code === 'offsale',
-            source: 'Ticketmaster / TicketWeb',
-            spotifyUrl,
-            spotifyArtistId,
-            spotifyTrackUrl: null,
-            previewAudioUrl: null,
-            previewTrackTitle: null,
-          });
+            const genre =
+              ev.classifications?.[0]?.subGenre?.name ||
+              ev.classifications?.[0]?.genre?.name ||
+              'Live Music';
+
+            const priceRange = ev.priceRanges?.[0];
+            const priceStr = priceRange
+              ? `$${Math.round(priceRange.min)}${priceRange.max && priceRange.max !== priceRange.min ? `–$${Math.round(priceRange.max)}` : ''}`
+              : null;
+
+            events.push({
+              id: `tm-${ev.id}`,
+              title: ev.name,
+              headliner,
+              support,
+              date,
+              time: ev.dates?.start?.localTime ? format24To12(ev.dates.start.localTime) : '8:00 PM',
+              venueId: venue.id,
+              venueName: venue.name,
+              venueShort: venue.shortName,
+              corridor: venue.corridor,
+              neighborhood: venue.neighborhood,
+              address: venue.address,
+              distanceMiles: venue.distanceMiles,
+              lat: venue.lat,
+              lng: venue.lng,
+              venueColor: venue.color,
+              ticketUrl: ev.url || venue.website,
+              imageUrl: imgObj?.url || null,
+              genre: genre === 'Undefined' ? 'Alternative / Indie' : genre,
+              price: priceStr,
+              ageRestriction: ev.ageRestrictions?.legalAgeEnforced ? '21+' : '18+ / All Ages',
+              soldOut: ev.dates?.status?.code === 'offsale',
+              source: 'Ticketmaster / TicketWeb',
+              spotifyUrl,
+              spotifyArtistId,
+              spotifyTrackUrl: null,
+              previewAudioUrl: null,
+              previewTrackTitle: null,
+            });
+          }
+          page += 1;
+        } catch (err) {
+          console.error('TM fetch error:', err.message);
+          break;
         }
-      } catch (err) {
-        console.error('TM fetch error:', err.message);
       }
     }
   }
   return events;
 }
 
-// 2. DICE.fm Partner API
+// 2. DICE.fm Partner API (filtered to our tracked venues & paginated across all pages)
 async function fetchDiceEvents() {
   const events = [];
   const apiKey = 'gc1iKklO05HOTvSuQyoH7dhPJTrWIWO3Dlhwkqc6';
-  const url =
-    'https://partners-endpoint.dice.fm/api/v2/events?page%5Bsize%5D=100&types=linkout,event&filter%5Bcities%5D%5B%5D=Chicago';
-  try {
-    const res = await fetch(url, { headers: { 'x-api-key': apiKey } });
-    if (!res.ok) return events;
-    const data = await res.json();
-    const rawList = data.data || [];
+  const base = 'https://partners-endpoint.dice.fm/api/v2/events';
+  const diceVenues = VENUES.flatMap((v) => v.diceNames || []);
+  const firstUrl = new URL(base);
+  firstUrl.searchParams.set('page[size]', '100');
+  firstUrl.searchParams.set('types', 'linkout,event');
+  for (const name of diceVenues) {
+    firstUrl.searchParams.append('filter[venues][]', name);
+  }
 
-    for (const ev of rawList) {
-      if (ev.status === 'cancelled') continue;
-      const venue = VENUES.find(
-        (v) =>
-          v.diceNames?.some((dn) => dn.trim().toLowerCase() === (ev.venue || '').trim().toLowerCase()) ||
-          v.name.toLowerCase() === (ev.venue || '').trim().toLowerCase()
-      );
-      if (!venue) continue;
+  let nextUrl = firstUrl.toString();
+  let pageCount = 0;
 
-      const dObj = new Date(ev.date);
-      const chicagoDate = dObj.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
-      const chicagoTime = dObj.toLocaleTimeString('en-US', {
-        timeZone: 'America/Chicago',
-        hour: 'numeric',
-        minute: '2-digit',
-      });
+  while (nextUrl && pageCount < 12) {
+    try {
+      const res = await fetch(nextUrl, { headers: { 'x-api-key': apiKey } });
+      if (!res.ok) break;
+      const data = await res.json();
+      const rawList = data.data || [];
+      if (rawList.length === 0) break;
+      pageCount += 1;
 
-      const artists = ev.artists || [];
-      const headliner = artists[0] || cleanArtistName(ev.name);
-      const support = artists.slice(1);
+      for (const ev of rawList) {
+        if (ev.status === 'cancelled') continue;
+        const venue = VENUES.find(
+          (v) =>
+            v.diceNames?.some((dn) => dn.trim().toLowerCase() === (ev.venue || '').trim().toLowerCase()) ||
+            v.name.toLowerCase() === (ev.venue || '').trim().toLowerCase()
+        );
+        if (!venue) continue;
 
-      const spTrack = ev.spotify_tracks?.[0];
-      const appleTrack = ev.apple_music_tracks?.[0];
+        const dObj = new Date(ev.date);
+        const chicagoDate = dObj.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+        const chicagoTime = dObj.toLocaleTimeString('en-US', {
+          timeZone: 'America/Chicago',
+          hour: 'numeric',
+          minute: '2-digit',
+        });
 
-      const genreRaw = ev.genre_tags?.[0] || ev.tags?.[0] || 'Indie / Club';
-      const genre = genreRaw.replace(/^music:/i, '').replace(/-/g, ' ');
+        const artists = ev.artists || [];
+        const headliner = artists[0] || cleanArtistName(ev.name);
+        const support = artists.slice(1);
 
-      const rawPrice =
-        typeof ev.price === 'number'
-          ? ev.price
-          : typeof ev.price?.amount === 'number'
-          ? ev.price.amount
-          : typeof ev.ticket_types?.[0]?.price === 'number'
-          ? ev.ticket_types[0].price
-          : typeof ev.ticket_types?.[0]?.price?.total === 'number'
-          ? ev.ticket_types[0].price.total
-          : null;
-      const priceStr =
-        rawPrice != null && !Number.isNaN(rawPrice)
-          ? rawPrice === 0
-            ? 'Free'
-            : `$${(rawPrice / 100).toFixed(0)}`
-          : null;
+        const spTrack = ev.spotify_tracks?.[0];
+        const appleTrack = ev.apple_music_tracks?.[0];
 
-      events.push({
-        id: `dice-${ev.id || ev.hash}`,
-        title: ev.name,
-        headliner,
-        support,
-        date: chicagoDate,
-        time: chicagoTime,
-        venueId: venue.id,
-        venueName: venue.name,
-        venueShort: venue.shortName,
-        corridor: venue.corridor,
-        neighborhood: venue.neighborhood,
-        address: venue.address,
-        distanceMiles: venue.distanceMiles,
-        lat: venue.lat,
-        lng: venue.lng,
-        venueColor: venue.color,
-        ticketUrl: ev.url || `https://dice.fm/event/${ev.perm_name}`,
-        imageUrl: ev.event_images?.landscape || ev.event_images?.square || ev.images?.[0] || null,
-        genre: genre.charAt(0).toUpperCase() + genre.slice(1),
-        price: priceStr,
-        ageRestriction: ev.age_limit || '21+',
-        soldOut: Boolean(ev.sold_out),
-        source: 'DICE.fm',
-        spotifyUrl:
-          spTrack?.open_url || `https://open.spotify.com/search/${encodeURIComponent(headliner)}`,
-        spotifyArtistId: null,
-        spotifyTrackUrl: spTrack?.open_url || null,
-        previewAudioUrl: spTrack?.preview_url || appleTrack?.preview_url || null,
-        previewTrackTitle: spTrack?.title || appleTrack?.title || null,
-      });
+        const genreRaw = ev.genre_tags?.[0] || ev.tags?.[0] || 'Indie / Club';
+        const genre = genreRaw.replace(/^music:/i, '').replace(/-/g, ' ');
+
+        const rawPrice =
+          typeof ev.price === 'number'
+            ? ev.price
+            : typeof ev.price?.amount === 'number'
+            ? ev.price.amount
+            : typeof ev.ticket_types?.[0]?.price === 'number'
+            ? ev.ticket_types[0].price
+            : typeof ev.ticket_types?.[0]?.price?.total === 'number'
+            ? ev.ticket_types[0].price.total
+            : null;
+        const priceStr =
+          rawPrice != null && !Number.isNaN(rawPrice)
+            ? rawPrice === 0
+              ? 'Free'
+              : `$${(rawPrice / 100).toFixed(0)}`
+            : null;
+
+        events.push({
+          id: `dice-${ev.id || ev.hash}`,
+          title: ev.name,
+          headliner,
+          support,
+          date: chicagoDate,
+          time: chicagoTime,
+          venueId: venue.id,
+          venueName: venue.name,
+          venueShort: venue.shortName,
+          corridor: venue.corridor,
+          neighborhood: venue.neighborhood,
+          address: venue.address,
+          distanceMiles: venue.distanceMiles,
+          lat: venue.lat,
+          lng: venue.lng,
+          venueColor: venue.color,
+          ticketUrl: ev.url || `https://dice.fm/event/${ev.perm_name}`,
+          imageUrl: ev.event_images?.landscape || ev.event_images?.square || ev.images?.[0] || null,
+          genre: genre.charAt(0).toUpperCase() + genre.slice(1),
+          price: priceStr,
+          ageRestriction: ev.age_limit || '21+',
+          soldOut: Boolean(ev.sold_out),
+          source: 'DICE.fm',
+          spotifyUrl:
+            spTrack?.open_url || `https://open.spotify.com/search/${encodeURIComponent(headliner)}`,
+          spotifyArtistId: null,
+          spotifyTrackUrl: spTrack?.open_url || null,
+          previewAudioUrl: spTrack?.preview_url || appleTrack?.preview_url || null,
+          previewTrackTitle: spTrack?.title || appleTrack?.title || null,
+        });
+      }
+
+      // Dice's links.next points to events-api.dice.fm; keep query string on partners-endpoint.dice.fm
+      if (data.links?.next && data.links.next.includes('?')) {
+        nextUrl = `${base}${data.links.next.substring(data.links.next.indexOf('?'))}`;
+      } else {
+        nextUrl = null;
+      }
+    } catch (err) {
+      console.error('Dice fetch error:', err.message);
+      break;
     }
-  } catch (err) {
-    console.error('Dice fetch error:', err.message);
   }
   return events;
 }
@@ -946,13 +996,21 @@ export async function syncAllChicagoMusicEvents() {
 
   // Venue calendars also list closures and private rentals, which aren't shows
   const NOT_A_SHOW = /^closed\b|private (event|rental|party)|\[private\]|pop-up box office/i;
-  const shows = deduped.filter((ev) => !NOT_A_SHOW.test(ev.title) && !NOT_A_SHOW.test(ev.headliner));
+  const { startDate, endDate } = getTwelveMonthHorizon();
+  const shows = deduped.filter(
+    (ev) =>
+      !NOT_A_SHOW.test(ev.title) &&
+      !NOT_A_SHOW.test(ev.headliner) &&
+      ev.date >= startDate &&
+      ev.date <= endDate
+  );
 
   const enriched = await enrichArtistsWithPreviews(shows);
 
   const payload = {
     lastSyncedAt: new Date().toISOString(),
     startedAt,
+    horizon: { startDate, endDate, months: 12 },
     wardCenter: WARD_1_CENTER,
     sourceBreakdown: {
       ticketmasterAndTicketWeb: tmEvents.length,
@@ -972,14 +1030,18 @@ export async function syncAllChicagoMusicEvents() {
     events: enriched,
   };
 
-  try {
-    await fs.writeFile(CACHE_FILE, JSON.stringify(payload, null, 2));
-    // Also write to public/events_snapshot.json so Vite static frontend always has the latest snapshot
-    const publicDir = path.join(__dirname, '..', 'public');
-    await fs.mkdir(publicDir, { recursive: true });
-    await fs.writeFile(path.join(publicDir, 'events_snapshot.json'), JSON.stringify(payload, null, 2));
-  } catch (err) {
-    console.error('Failed to write cache:', err.message);
+  if (enriched.length > 0) {
+    try {
+      await fs.writeFile(CACHE_FILE, JSON.stringify(payload, null, 2));
+      // Also write to public/events_snapshot.json so Vite static frontend always has the latest snapshot
+      const publicDir = path.join(__dirname, '..', 'public');
+      await fs.mkdir(publicDir, { recursive: true });
+      await fs.writeFile(path.join(publicDir, 'events_snapshot.json'), JSON.stringify(payload, null, 2));
+    } catch (err) {
+      console.error('Failed to write cache:', err.message);
+    }
+  } else {
+    console.warn('Sync returned 0 events; keeping existing cache and snapshot untouched.');
   }
 
   return payload;

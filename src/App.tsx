@@ -12,14 +12,35 @@ import {
   MapPin,
   Music,
   Pause,
+  Pencil,
   Play,
+  Plus,
   RefreshCw,
   Search,
+  Sparkles,
+  Star,
   Ticket,
   X,
 } from 'lucide-react';
 import { GENRE_FAMILIES, OTHER_GENRE, genreFamily, genreFamilyIds } from './genres';
 import { fetchDeezerPreviewUrl, silentClip } from './preview';
+import {
+  type VenueList,
+  createVenueList,
+  downloadFilteredIcs,
+  loadVenueLists,
+  saveVenueLists,
+} from './venueLists';
+import { VenueListModal } from './VenueListModal';
+import {
+  type RecommendationMatch,
+  type TasteProfile,
+  buildTasteIndex,
+  completeSpotifyCallbackIfPresent,
+  loadTasteProfile,
+  scoreEventForUser,
+} from './spotify';
+import { SpotifySyncModal } from './SpotifySyncModal';
 
 export interface Venue {
   id: string;
@@ -78,11 +99,12 @@ interface CalendarPayload {
     maxRadiusMiles: number;
   };
   sourceBreakdown: Record<string, number>;
+  horizon?: { startDate: string; endDate: string; months: number };
   venues: Venue[];
   events: MusicEvent[];
 }
 
-type ViewMode = 'month' | 'agenda' | 'radar';
+type ViewMode = 'month' | 'agenda' | 'foryou' | 'radar';
 type PreviewStatus = 'idle' | 'loading' | 'playing' | 'error';
 
 const CORRIDORS = [
@@ -96,6 +118,7 @@ const CORRIDORS = [
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const AGENDA_PAGE_DAYS = 14;
+const FOR_YOU_PAGE = 24;
 
 // Static builds (GitHub Pages) have no API server; data comes from the snapshot refreshed by CI
 const IS_STATIC = import.meta.env.VITE_STATIC === '1';
@@ -105,8 +128,56 @@ function chicagoToday() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
 }
 
+function addMonthsToDateStr(dateStr: string, months: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1 + months, d));
+  return dt.toISOString().slice(0, 10);
+}
+
+interface HorizonMonth {
+  key: string; // YYYY-MM
+  year: number;
+  month: number; // 0-indexed
+  shortLabel: string;
+  yearSuffix: string;
+}
+
+function buildHorizonMonths(startDate: string, endDate: string): HorizonMonth[] {
+  const [sy, sm] = startDate.split('-').map(Number);
+  const [ey, em] = endDate.split('-').map(Number);
+  const months: HorizonMonth[] = [];
+  let y = sy;
+  let m = sm - 1;
+  while (y < ey || (y === ey && m <= em - 1)) {
+    const dt = new Date(y, m, 1);
+    months.push({
+      key: `${y}-${String(m + 1).padStart(2, '0')}`,
+      year: y,
+      month: m,
+      shortLabel: dt.toLocaleDateString('en-US', { month: 'short' }),
+      yearSuffix: m === 0 || months.length === 0 ? ` '${String(y).slice(2)}` : '',
+    });
+    m += 1;
+    if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+  }
+  return months;
+}
+
 function formatDate(dateStr: string, opts: Intl.DateTimeFormatOptions) {
   return new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', opts);
+}
+
+function formatShowDate(dateStr: string, todayStr: string, weekday: 'short' | 'long' = 'long') {
+  const sameYear = dateStr.slice(0, 4) === todayStr.slice(0, 4);
+  return formatDate(dateStr, {
+    weekday,
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  });
 }
 
 function ShowThumb({ ev }: { ev: MusicEvent }) {
@@ -134,6 +205,8 @@ interface ShowCardProps {
   previewStatus: PreviewStatus;
   embedOpen: boolean;
   activeGenres: string[];
+  match?: RecommendationMatch | null;
+  dateLabel?: string;
   onTogglePreview: (ev: MusicEvent) => void;
   onToggleEmbed: (ev: MusicEvent) => void;
   onToggleGenre: (id: string) => void;
@@ -144,12 +217,28 @@ function ShowCard({
   previewStatus,
   embedOpen,
   activeGenres,
+  match,
+  dateLabel,
   onTogglePreview,
   onToggleEmbed,
   onToggleGenre,
 }: ShowCardProps) {
   return (
-    <article className="show-card" style={{ '--venue-color': ev.venueColor } as React.CSSProperties}>
+    <article
+      className={`show-card ${match ? `show-card-match-${match.kind}` : ''}`}
+      style={{ '--venue-color': ev.venueColor } as React.CSSProperties}
+    >
+      {(match || dateLabel) && (
+        <div className="show-card-badges">
+          {dateLabel && <span className="show-date-chip">{dateLabel}</span>}
+          {match && (
+            <span className={`match-badge match-${match.kind}`} title={match.detail}>
+              <Sparkles size={11} /> {match.label}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="show-card-top">
         <ShowThumb ev={ev} />
         <div className="show-card-text">
@@ -262,6 +351,15 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState<string>(today);
   const [activeSpotifyEmbed, setActiveSpotifyEmbed] = useState<string | null>(null);
   const lineupRef = useRef<HTMLElement | null>(null);
+  const monthStripRef = useRef<HTMLDivElement | null>(null);
+
+  // Favorite venue lists and the taste profile are kept in this browser only
+  const [venueLists, setVenueLists] = useState<VenueList[]>(loadVenueLists);
+  const [listEditor, setListEditor] = useState<{ list: VenueList | null } | null>(null);
+  const [tasteProfile, setTasteProfile] = useState<TasteProfile | null>(loadTasteProfile);
+  const [spotifyOpen, setSpotifyOpen] = useState(false);
+  const [spotifyNotice, setSpotifyNotice] = useState<string | null>(null);
+  const [forYouLimit, setForYouLimit] = useState(FOR_YOU_PAGE);
 
   // Audio player for 30s track previews. One element is reused so a tap-unlocked
   // element stays unlocked on mobile browsers.
@@ -271,6 +369,15 @@ export default function App() {
 
   useEffect(() => {
     loadCalendarData();
+    // Spotify redirects back to this page with ?code=… after login
+    completeSpotifyCallbackIfPresent((msg) => setSpotifyNotice(msg))
+      .then((profile) => {
+        if (!profile) return;
+        setTasteProfile(profile);
+        setViewMode('foryou');
+        setSpotifyNotice(null);
+      })
+      .catch((err) => setSpotifyNotice(err?.message || 'Spotify sync failed.'));
   }, []);
 
   async function loadCalendarData() {
@@ -360,6 +467,41 @@ export default function App() {
     setSearchQuery('');
   }
 
+  function applyVenueList(list: VenueList) {
+    setSelectedCorridor('ALL');
+    setSelectedVenueIds(activeList?.id === list.id ? [] : [...list.venueIds]);
+  }
+
+  function saveVenueList(name: string, venueIds: string[], existingId?: string) {
+    const ids = [...new Set(venueIds)];
+    setVenueLists((prev) => {
+      const next = existingId
+        ? prev.map((l) => (l.id === existingId ? { ...l, name, venueIds: ids } : l))
+        : [...prev, createVenueList(name, ids)];
+      saveVenueLists(next);
+      return next;
+    });
+    setSelectedCorridor('ALL');
+    setSelectedVenueIds(ids);
+    setListEditor(null);
+  }
+
+  function deleteVenueList(id: string) {
+    setVenueLists((prev) => {
+      const next = prev.filter((l) => l.id !== id);
+      saveVenueLists(next);
+      return next;
+    });
+    if (activeList?.id === id) setSelectedVenueIds([]);
+    setListEditor(null);
+  }
+
+  function exportFilteredIcs() {
+    const name = activeList ? activeList.name : 'Filtered shows';
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'shows';
+    downloadFilteredIcs(filteredEvents, `Chicago Live Music · ${name}`, `chicago-music-${slug}.ics`);
+  }
+
   function goToDate(dateStr: string) {
     const [y, m] = dateStr.split('-').map(Number);
     setCurrentMonth({ year: y, month: m - 1 });
@@ -377,11 +519,44 @@ export default function App() {
     });
   }
 
-  // Snapshots can be hours old and some feeds list past dates; only show today onward
+  // Snapshots can be hours old and some feeds list past dates; show today through the next 12 months
+  const horizonEnd = data?.horizon?.endDate || addMonthsToDateStr(today, 12);
   const upcomingEvents = useMemo(
-    () => (data?.events || []).filter((ev) => ev.date >= today),
-    [data, today]
+    () => (data?.events || []).filter((ev) => ev.date >= today && ev.date <= horizonEnd),
+    [data, today, horizonEnd]
   );
+  const horizonMonths = useMemo(() => buildHorizonMonths(today, horizonEnd), [today, horizonEnd]);
+
+  const tasteIndex = useMemo(() => buildTasteIndex(tasteProfile), [tasteProfile]);
+  const matchById = useMemo(() => {
+    const map = new Map<string, RecommendationMatch>();
+    if (!tasteIndex) return map;
+    for (const ev of upcomingEvents) {
+      const match = scoreEventForUser(ev, tasteIndex);
+      if (match) map.set(ev.id, match);
+    }
+    return map;
+  }, [upcomingEvents, tasteIndex]);
+  const exactMatchTotal = useMemo(
+    () => [...matchById.values()].filter((m) => m.kind === 'exact').length,
+    [matchById]
+  );
+
+  const venueById = useMemo(
+    () => new Map((data?.venues || []).map((v) => [v.id, v])),
+    [data]
+  );
+
+  // A list is active when the venue selection is exactly that list
+  const activeList = useMemo(() => {
+    if (selectedVenueIds.length === 0) return null;
+    const selected = new Set(selectedVenueIds);
+    return (
+      venueLists.find(
+        (l) => l.venueIds.length === selected.size && l.venueIds.every((id) => selected.has(id))
+      ) || null
+    );
+  }, [venueLists, selectedVenueIds]);
 
   const filteredVenues = useMemo(() => {
     if (!data?.venues) return [];
@@ -429,15 +604,43 @@ export default function App() {
     return { filteredEvents: filtered, genreCounts, venueCounts };
   }, [upcomingEvents, selectedCorridor, selectedVenueIds, selectedGenres, maxDistance, searchQuery]);
 
-  // Group events by YYYY-MM-DD
+  // Group events by YYYY-MM-DD, with shows matching the taste profile first
   const eventsByDate = useMemo(() => {
     const map: Record<string, MusicEvent[]> = {};
     for (const ev of filteredEvents) {
       if (!map[ev.date]) map[ev.date] = [];
       map[ev.date].push(ev);
     }
+    if (matchById.size > 0) {
+      for (const day of Object.values(map)) {
+        day.sort((a, b) => (matchById.get(b.id)?.score || 0) - (matchById.get(a.id)?.score || 0));
+      }
+    }
     return map;
+  }, [filteredEvents, matchById]);
+
+  const monthCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const ev of filteredEvents) {
+      const key = ev.date.slice(0, 7);
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
   }, [filteredEvents]);
+
+  const forYou = useMemo(() => {
+    const exact: MusicEvent[] = [];
+    const recommended: MusicEvent[] = [];
+    for (const ev of filteredEvents) {
+      const match = matchById.get(ev.id);
+      if (!match) continue;
+      (match.kind === 'exact' ? exact : recommended).push(ev);
+    }
+    recommended.sort(
+      (a, b) => matchById.get(b.id)!.score - matchById.get(a.id)!.score || a.date.localeCompare(b.date)
+    );
+    return { exact, recommended };
+  }, [filteredEvents, matchById]);
 
   const sortedDates = useMemo(() => Object.keys(eventsByDate).sort(), [eventsByDate]);
 
@@ -502,6 +705,19 @@ export default function App() {
     (selectedCorridor !== 'ALL' ? 1 : 0) +
     (maxDistance < 10 ? 1 : 0) +
     (searchQuery.trim() ? 1 : 0);
+
+  const currentMonthKey = `${currentMonth.year}-${String(currentMonth.month + 1).padStart(2, '0')}`;
+  const atFirstMonth = currentMonthKey <= (horizonMonths[0]?.key || '');
+  const atLastMonth = currentMonthKey >= (horizonMonths[horizonMonths.length - 1]?.key || '');
+
+  // Keep the selected month chip visible in the sideways-scrolling strip
+  useEffect(() => {
+    const strip = monthStripRef.current;
+    const chip = strip?.querySelector<HTMLElement>('.month-chip.active');
+    if (strip && chip) {
+      strip.scrollLeft = chip.offsetLeft - strip.clientWidth / 2 + chip.clientWidth / 2;
+    }
+  }, [currentMonthKey, viewMode, data]);
 
   function changeMonth(delta: number) {
     setCurrentMonth((prev) => {
@@ -569,18 +785,28 @@ export default function App() {
                 {syncing ? 'Syncing…' : 'Sync now'}
               </button>
             )}
-            <a
-              className="btn"
-              href={
-                IS_STATIC
-                  ? `${BASE}calendar.ics`
-                  : `${BASE}api/calendar.ics?corridor=${encodeURIComponent(selectedCorridor)}`
-              }
-              download="chicago-ward1-music.ics"
+            <button
+              className="btn btn-spotify"
+              onClick={() => (tasteProfile ? setViewMode('foryou') : setSpotifyOpen(true))}
             >
-              <Download size={15} />
-              Export .ics
-            </a>
+              <Sparkles size={15} />
+              {tasteProfile ? `For you · ${matchById.size}` : 'Match my Spotify'}
+            </button>
+            {activeFilterCount > 0 ? (
+              <button className="btn" onClick={exportFilteredIcs} disabled={filteredEvents.length === 0}>
+                <Download size={15} />
+                Export {filteredEvents.length} shows
+              </button>
+            ) : (
+              <a
+                className="btn"
+                href={IS_STATIC ? `${BASE}calendar.ics` : `${BASE}api/calendar.ics`}
+                download="chicago-ward1-music.ics"
+              >
+                <Download size={15} />
+                Export .ics
+              </a>
+            )}
             <span className="hero-updated">
               Updated{' '}
               {new Date(data.lastSyncedAt).toLocaleString('en-US', {
@@ -612,6 +838,15 @@ export default function App() {
           </div>
         </dl>
       </header>
+
+      {spotifyNotice && (
+        <div className="notice-bar" role="status">
+          <span>{spotifyNotice}</span>
+          <button className="link-btn" onClick={() => setSpotifyNotice(null)} aria-label="Dismiss">
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Filter Bar */}
       <section className="toolbar">
@@ -648,6 +883,14 @@ export default function App() {
               onClick={() => setViewMode('agenda')}
             >
               <List size={15} /> Lineup
+            </button>
+            <button
+              role="tab"
+              aria-selected={viewMode === 'foryou'}
+              className={viewMode === 'foryou' ? 'active' : ''}
+              onClick={() => setViewMode('foryou')}
+            >
+              <Sparkles size={15} /> For you
             </button>
             <button
               role="tab"
@@ -704,6 +947,44 @@ export default function App() {
         </div>
 
         <div className="filter-group">
+          <span className="filter-label">My lists</span>
+          <div className="chip-row">
+            {venueLists.map((list) => {
+              const active = activeList?.id === list.id;
+              const showCount = list.venueIds.reduce((n, id) => n + (venueCounts[id] || 0), 0);
+              const venueNames = list.venueIds.map((id) => venueById.get(id)?.shortName || id).join(', ');
+              return (
+                <span key={list.id} className={`list-pill ${active ? 'active' : ''}`}>
+                  <button
+                    className="list-pill-main"
+                    aria-pressed={active}
+                    onClick={() => applyVenueList(list)}
+                    title={venueNames}
+                  >
+                    <Star size={13} className="list-star" />
+                    {list.name}
+                    <span className="count">{showCount}</span>
+                  </button>
+                  <button
+                    className="list-pill-edit"
+                    aria-label={`Edit ${list.name}`}
+                    onClick={() => setListEditor({ list })}
+                  >
+                    <Pencil size={12} />
+                  </button>
+                </span>
+              );
+            })}
+            <button className="pill pill-dashed" onClick={() => setListEditor({ list: null })}>
+              <Plus size={14} />
+              {selectedVenueIds.length > 0 && !activeList
+                ? `Save ${selectedVenueIds.length} venues as a list`
+                : 'New list'}
+            </button>
+          </div>
+        </div>
+
+        <div className="filter-group">
           <span className="filter-label">Venues</span>
           <div className="venue-controls">
             <button
@@ -711,7 +992,9 @@ export default function App() {
               aria-expanded={venuesOpen}
               onClick={() => setVenuesOpen((o) => !o)}
             >
-              {selectedVenueIds.length > 0
+              {activeList
+                ? `${activeList.name} · ${selectedVenueIds.length}`
+                : selectedVenueIds.length > 0
                 ? `${selectedVenueIds.length} selected`
                 : `All ${filteredVenues.length} venues`}
               <ChevronDown size={14} className={venuesOpen ? 'flip' : ''} />
@@ -767,23 +1050,56 @@ export default function App() {
       </section>
 
       {/* Workspace: Calendar / Agenda / Radar + Daily Lineup */}
-      <div className={`main-workspace ${viewMode === 'agenda' ? 'single' : ''}`}>
+      <div
+        className={`main-workspace ${viewMode === 'agenda' || viewMode === 'foryou' ? 'single' : ''}`}
+      >
         <div className="calendar-panel">
           {viewMode === 'month' && (
             <>
               <div className="calendar-nav">
                 <div className="month-stepper">
-                  <button className="btn btn-icon" onClick={() => changeMonth(-1)} aria-label="Previous month">
+                  <button
+                    className="btn btn-icon"
+                    onClick={() => changeMonth(-1)}
+                    disabled={atFirstMonth}
+                    aria-label="Previous month"
+                  >
                     <ChevronLeft size={18} />
                   </button>
                   <h2 className="month-title">{monthLabel}</h2>
-                  <button className="btn btn-icon" onClick={() => changeMonth(1)} aria-label="Next month">
+                  <button
+                    className="btn btn-icon"
+                    onClick={() => changeMonth(1)}
+                    disabled={atLastMonth}
+                    aria-label="Next month"
+                  >
                     <ChevronRight size={18} />
                   </button>
                 </div>
                 <button className="btn" onClick={() => goToDate(today)}>
                   Today
                 </button>
+              </div>
+
+              <div className="month-strip" ref={monthStripRef} aria-label="Next 12 months">
+                {horizonMonths.map((m) => {
+                  const active = m.key === currentMonthKey;
+                  const count = monthCounts[m.key] || 0;
+                  return (
+                    <button
+                      key={m.key}
+                      className={`month-chip ${active ? 'active' : ''} ${count === 0 ? 'empty' : ''}`}
+                      aria-pressed={active}
+                      onClick={() => setCurrentMonth({ year: m.year, month: m.month })}
+                    >
+                      <span className="month-chip-label">
+                        {m.shortLabel}
+                        {m.yearSuffix}
+                      </span>
+                      <span className="month-chip-count">{count}</span>
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="weekday-header">
@@ -827,10 +1143,13 @@ export default function App() {
                       {visibleBadges.map((ev) => (
                         <span
                           key={ev.id}
-                          className="event-badge"
+                          className={`event-badge ${matchById.get(ev.id)?.kind === 'exact' ? 'is-favorite' : ''}`}
                           style={{ borderLeftColor: ev.venueColor }}
                         >
-                          <span className="event-badge-artist">{ev.headliner}</span>
+                          <span className="event-badge-artist">
+                            {matchById.has(ev.id) && <Sparkles size={9} className="badge-spark" />}
+                            {ev.headliner}
+                          </span>
                           <span className="event-badge-venue">{ev.venueShort}</span>
                         </span>
                       ))}
@@ -870,7 +1189,7 @@ export default function App() {
                         {dateStr === today
                           ? 'Tonight · '
                           : ''}
-                        {formatDate(dateStr, { weekday: 'long', month: 'short', day: 'numeric' })}
+                        {formatShowDate(dateStr, today)}
                       </span>
                       <span className="agenda-day-count">
                         {dayEvs.length} {dayEvs.length === 1 ? 'show' : 'shows'}
@@ -883,6 +1202,7 @@ export default function App() {
                           ev={ev}
                           previewStatus={preview?.id === ev.id ? preview.status : 'idle'}
                           embedOpen={activeSpotifyEmbed === ev.id}
+                          match={matchById.get(ev.id)}
                           {...cardProps}
                         />
                       ))}
@@ -894,6 +1214,98 @@ export default function App() {
                 <button className="btn load-more" onClick={() => setAgendaDays((n) => n + AGENDA_PAGE_DAYS)}>
                   Show more days
                 </button>
+              )}
+            </div>
+          )}
+
+          {viewMode === 'foryou' && (
+            <div className="foryou-panel">
+              {!tasteProfile ? (
+                <div className="foryou-empty">
+                  <Sparkles size={28} />
+                  <h3>Shows picked for your taste</h3>
+                  <p>
+                    Connect Spotify to pull your top and followed artists, or type in a few artists you
+                    like. Their Chicago dates and similar acts over the next 12 months show up here.
+                  </p>
+                  <button className="btn btn-spotify-solid" onClick={() => setSpotifyOpen(true)}>
+                    <Headphones size={15} /> Connect Spotify or add artists
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="foryou-head">
+                    <div>
+                      <h3>
+                        {tasteProfile.mode === 'spotify' && tasteProfile.displayName
+                          ? `For ${tasteProfile.displayName}`
+                          : 'Picked for you'}
+                      </h3>
+                      <p>
+                        Based on {tasteProfile.artists.length} artists
+                        {activeFilterCount > 0 ? ' · within your current filters' : ''}
+                      </p>
+                    </div>
+                    <button className="btn btn-spotify" onClick={() => setSpotifyOpen(true)}>
+                      <Headphones size={14} /> Manage
+                    </button>
+                  </div>
+
+                  <section className="foryou-section">
+                    <h4 className="foryou-section-title">
+                      Your artists in Chicago <span>{forYou.exact.length}</span>
+                    </h4>
+                    {forYou.exact.length === 0 ? (
+                      <p className="foryou-none">
+                        None of your artists have a listed date in the next 12 months yet.
+                      </p>
+                    ) : (
+                      <div className="agenda-cards-grid">
+                        {forYou.exact.map((ev) => (
+                          <ShowCard
+                            key={ev.id}
+                            ev={ev}
+                            previewStatus={preview?.id === ev.id ? preview.status : 'idle'}
+                            embedOpen={activeSpotifyEmbed === ev.id}
+                            match={matchById.get(ev.id)}
+                            dateLabel={formatShowDate(ev.date, today, 'short')}
+                            {...cardProps}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="foryou-section">
+                    <h4 className="foryou-section-title">
+                      You might like <span>{forYou.recommended.length}</span>
+                    </h4>
+                    {forYou.recommended.length === 0 ? (
+                      <p className="foryou-none">
+                        No similar-artist matches yet. Adding more artists widens the net.
+                      </p>
+                    ) : (
+                      <div className="agenda-cards-grid">
+                        {forYou.recommended.slice(0, forYouLimit).map((ev) => (
+                          <ShowCard
+                            key={ev.id}
+                            ev={ev}
+                            previewStatus={preview?.id === ev.id ? preview.status : 'idle'}
+                            embedOpen={activeSpotifyEmbed === ev.id}
+                            match={matchById.get(ev.id)}
+                            dateLabel={formatShowDate(ev.date, today, 'short')}
+                            {...cardProps}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {forYou.recommended.length > forYouLimit && (
+                      <button className="btn load-more" onClick={() => setForYouLimit((n) => n + FOR_YOU_PAGE)}>
+                        Show more picks
+                      </button>
+                    )}
+                  </section>
+                </>
               )}
             </div>
           )}
@@ -975,11 +1387,11 @@ export default function App() {
         </div>
 
         {/* Sidebar: selected date lineup */}
-        {viewMode !== 'agenda' && (
+        {(viewMode === 'month' || viewMode === 'radar') && (
           <aside className="lineup-sidebar" ref={lineupRef}>
             <div className="lineup-header">
               <span className="filter-label">{selectedDate === today ? 'Tonight' : 'Lineup'}</span>
-              <h2>{formatDate(selectedDate, { weekday: 'long', month: 'short', day: 'numeric' })}</h2>
+              <h2>{formatShowDate(selectedDate, today)}</h2>
               <p>
                 {selectedDayEvents.length} {selectedDayEvents.length === 1 ? 'show' : 'shows'}
                 {activeFilterCount > 0 ? ' matching your filters' : ''}
@@ -991,7 +1403,7 @@ export default function App() {
                 {activeFilterCount > 0 ? 'Nothing matches your filters on this date.' : 'No shows listed on this date.'}
                 {nextDateWithShows && (
                   <button className="btn" onClick={() => goToDate(nextDateWithShows)}>
-                    Jump to {formatDate(nextDateWithShows, { weekday: 'short', month: 'short', day: 'numeric' })}
+                    Jump to {formatShowDate(nextDateWithShows, today, 'short')}
                   </button>
                 )}
                 {activeFilterCount > 0 && (
@@ -1007,6 +1419,7 @@ export default function App() {
                   ev={ev}
                   previewStatus={preview?.id === ev.id ? preview.status : 'idle'}
                   embedOpen={activeSpotifyEmbed === ev.id}
+                  match={matchById.get(ev.id)}
                   {...cardProps}
                 />
               ))
@@ -1014,6 +1427,27 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {listEditor && (
+        <VenueListModal
+          venues={data.venues}
+          initialList={listEditor.list}
+          preselectedVenueIds={listEditor.list ? [] : selectedVenueIds}
+          onSave={saveVenueList}
+          onDelete={deleteVenueList}
+          onClose={() => setListEditor(null)}
+        />
+      )}
+
+      {spotifyOpen && (
+        <SpotifySyncModal
+          profile={tasteProfile}
+          exactMatchCount={exactMatchTotal}
+          recommendedCount={matchById.size}
+          onProfileChange={setTasteProfile}
+          onClose={() => setSpotifyOpen(false)}
+        />
+      )}
 
       <footer className="site-footer">
         Listings pulled from Ticketmaster, TicketWeb, DICE and venue sites. Check the venue before you

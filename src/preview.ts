@@ -1,7 +1,7 @@
 // Deezer's API has no CORS headers but does support JSONP
 let jsonpCounter = 0;
 
-function deezerJsonp<T>(path: string): Promise<T> {
+export function deezerJsonp<T>(path: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const callback = `__deezer_cb_${Date.now()}_${jsonpCounter++}`;
     const script = document.createElement('script');
@@ -22,7 +22,8 @@ function deezerJsonp<T>(path: string): Promise<T> {
       cleanup();
       reject(new Error('Deezer request failed'));
     };
-    script.src = `https://api.deezer.com/${path}?output=jsonp&callback=${callback}`;
+    const sep = path.includes('?') ? '&' : '?';
+    script.src = `https://api.deezer.com/${path}${sep}output=jsonp&callback=${callback}`;
     document.head.appendChild(script);
   });
 }
@@ -32,6 +33,23 @@ export async function fetchDeezerPreviewUrl(trackId: number): Promise<string> {
   const track = await deezerJsonp<{ preview?: string }>(`track/${trackId}`);
   if (!track?.preview) throw new Error('No preview for this track');
   return track.preview;
+}
+
+export async function fetchDeezerRelatedArtists(artistName: string): Promise<{
+  genres?: string[];
+  related: string[];
+}> {
+  const search = await deezerJsonp<{ data?: Array<{ id: number; name: string }> }>(
+    `search/artist?q=${encodeURIComponent(artistName)}&limit=1`
+  );
+  const artist = search?.data?.[0];
+  if (!artist) return { related: [] };
+  const rel = await deezerJsonp<{ data?: Array<{ name: string }> }>(
+    `artist/${artist.id}/related?limit=20`
+  );
+  return {
+    related: (rel?.data || []).map((a) => a.name).filter(Boolean),
+  };
 }
 
 let silentClipUrl: string | null = null;
