@@ -5059,5 +5059,44 @@
   },
   "supersonic: north america's tribute to oasis": {
     "notFound": true
+  },
+  "housegiving: a house music celebration": {
+    "notFound": true
+  },
+  "levity": {
+    "artistImage": "https://cdn-images.dzcdn.net/images/artist/10ccd3359242ee17434c3ba9516eebb9/500x500-000000-80-0-0.jpg",
+    "fans": 1492,
+    "topTrackTitle": "Levity – Pop Off",
+    "previewTrackId": 3827032241
+  },
+  "3ballmty": {
+    "artistImage": "https://cdn-images.dzcdn.net/images/artist/c17c6ef7319258a6cc239e86a5ac56c6/500x500-000000-80-0-0.jpg",
+    "fans": 36451,
+    "topTrackTitle": "3BallMTY – Inténtalo (feat. América Sierra & El Bebeto)",
+    "previewTrackId": 4234110272
+  },
+  "mau p": {
+    "artistImage": "https://cdn-images.dzcdn.net/images/artist/0f40555bc579fc175b726c518dc15766/500x500-000000-80-0-0.jpg",
+    "fans": 8419,
+    "topTrackTitle": "Mau P – Just A Little Bit More",
+    "previewTrackId": 4250841241
+  },
+  "bunt.": {
+    "artistImage": "https://cdn-images.dzcdn.net/images/artist/cfc1d848a84c7f7e12cebf0b39c03a21/500x500-000000-80-0-0.jpg",
+    "fans": 14947,
+    "topTrackTitle": "BUNT. – Back To The Start",
+    "previewTrackId": 4358124922
+  },
+  "whethan": {
+    "artistImage": "https://cdn-images.dzcdn.net/images/artist/a1813ec7a1a6722e48df07e9d3ad325f/500x500-000000-80-0-0.jpg",
+    "fans": 10448,
+    "topTrackTitle": "Whethan – MONEY ON THE DASH",
+    "previewTrackId": 2674458882
+  },
+  "kai wachi": {
+    "artistImage": "https://cdn-images.dzcdn.net/images/artist/88c129a193afd15d7ae4635f37a158df/500x500-000000-80-0-0.jpg",
+    "fans": 9926,
+    "topTrackTitle": "Kai Wachi – Bonebreaker",
+    "previewTrackId": 3525184851
   }
 }

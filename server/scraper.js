@@ -147,6 +147,8 @@ async function fetchTicketmasterEvents() {
             const tmVenueId = ev._embedded?.venues?.[0]?.id;
             const matched = slice.find((s) => s.tmId === tmVenueId) || slice[0];
             const venue = matched.venue;
+            const segmentName = ev.classifications?.[0]?.segment?.name;
+            if (venue.id === 'navy-pier' && segmentName && segmentName !== 'Music') continue;
             const date = ev.dates?.start?.localDate;
             if (!date) continue;
 
@@ -160,16 +162,18 @@ async function fetchTicketmasterEvents() {
               `https://open.spotify.com/search/${encodeURIComponent(headliner)}`;
 
             let spotifyArtistId = null;
-            const spMatch = spotifyUrl.match(/open\.spotify\.com\/artist\/([a-zA-Z0-9]+)/);
+            const spMatch = spotifyUrl.match(/open\.spotify\.com\/(?:intl-[a-z-]+\/)?artist\/([a-zA-Z0-9]+)/i);
             if (spMatch) spotifyArtistId = spMatch[1];
 
             const imgObj =
               ev.images?.find((im) => im.ratio === '16_9' && im.width >= 600) ||
               ev.images?.[0];
 
+            const subGenre = ev.classifications?.[0]?.subGenre?.name;
+            const mainGenre = ev.classifications?.[0]?.genre?.name;
             const genre =
-              ev.classifications?.[0]?.subGenre?.name ||
-              ev.classifications?.[0]?.genre?.name ||
+              (subGenre && !/^(undefined|other)$/i.test(subGenre) ? subGenre : null) ||
+              (mainGenre && !/^(undefined|other)$/i.test(mainGenre) ? mainGenre : null) ||
               'Live Music';
 
             const priceRange = ev.priceRanges?.[0];
@@ -196,7 +200,7 @@ async function fetchTicketmasterEvents() {
               venueColor: venue.color,
               ticketUrl: ev.url || venue.website,
               imageUrl: imgObj?.url || null,
-              genre: genre === 'Undefined' ? 'Alternative / Indie' : genre,
+              genre,
               price: priceStr,
               ageRestriction: ev.ageRestrictions?.legalAgeEnforced ? '21+' : '18+ / All Ages',
               soldOut: ev.dates?.status?.code === 'offsale',
@@ -815,7 +819,125 @@ async function scrapeHideoutDirect() {
   return events;
 }
 
+// 10. Navy Pier Concerts Direct (WordPress REST Concerts category + event-info-bar dates)
+async function scrapeNavyPierDirect() {
+  const events = [];
+  const venue = VENUES.find((v) => v.id === 'navy-pier');
+  if (!venue) return events;
+  try {
+    const listRes = await fetch(
+      'https://navypier.org/wp-json/wp/v2/navy_pier_events?tax_navy_pier_event_category=721&per_page=25&_embed',
+      { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' } }
+    );
+    if (!listRes.ok) return events;
+    const items = await listRes.json();
+    if (!Array.isArray(items)) return events;
+
+    const batchSize = 5;
+    for (let i = 0; i < items.length; i += batchSize) {
+      const batch = items.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map(async (it) => {
+          try {
+            const title = decodeEntities(it.title?.rendered);
+            if (!title || !it.link) return;
+            const pageRes = await fetch(it.link, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' },
+            });
+            if (!pageRes.ok) return;
+            const html = await pageRes.text();
+
+            const barRaw = html.match(/<div class="event-info-bar">([\s\S]{0,1600}?)(?:<div class="right-info|<\/section>)/i)?.[1]
+              || html.match(/<div class="event-info-bar">([\s\S]{0,1000})/i)?.[1]
+              || '';
+            const barText = decodeEntities(barRaw);
+
+            // Extract explicit year from the date bar so multi-day dates like "Fri, Jan 29 & Sat, Jan 30, 2027" keep the same year
+            const explicitYear = barText.match(/\b(20\d{2})\b/)?.[1] || '';
+            const dateMatches = [
+              ...barText.matchAll(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,?\s*20\d{2})?/gi),
+            ];
+            const dates = [];
+            for (const m of dateMatches) {
+              const raw = /\b20\d{2}\b/.test(m[0]) || !explicitYear ? m[0] : `${m[0]}, ${explicitYear}`;
+              const norm = normalizeDateString(raw);
+              if (norm && !dates.includes(norm)) dates.push(norm);
+            }
+            if (dates.length === 0) return;
+
+            const timeMatch = barText.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
+            const time = timeMatch
+              ? timeMatch[1].replace(/\s+/g, ' ').toUpperCase()
+              : '7:00 PM';
+
+            const tixrMatch = html.match(/https?:\/\/[^"'\s]*tixr\.com\/groups\/navypiereventcenter\/events\/[^"'\s?&]+/i);
+            const ticketUrl = tixrMatch ? decodeEntities(tixrMatch[0]) : it.link;
+
+            const imageUrl =
+              it._embedded?.['wp:featuredmedia']?.[0]?.source_url ||
+              it.yoast_head_json?.og_image?.[0]?.url ||
+              null;
+
+            const excerptText = decodeEntities(it.excerpt?.rendered || '');
+            const combined = `${title} ${excerptText}`.toLowerCase();
+            let genre = 'Live Music';
+            if (/house\b|rave|electronic|\bdj\b|360 show|open to close|techno|bass|edm/i.test(combined)) {
+              genre = 'Electronic / House / DJ';
+            } else if (/jazz|blues|soul/i.test(combined)) {
+              genre = 'Jazz / Soul';
+            } else if (/latin|banda|caribe|salsa|cumbia|noche/i.test(combined)) {
+              genre = 'Latin / World';
+            }
+
+            const headliner = cleanArtistName(title.replace(/\s+presents\b.*$/i, '')) || title;
+            const isFree = /\bfree\b|no ticket required/i.test(`${barText} ${excerptText}`);
+
+            for (const date of dates) {
+              events.push({
+                id: `navypier-${date}-${headliner.toLowerCase().replace(/[^a-z0-9]/g, '')}`,
+                title,
+                headliner,
+                support: [],
+                date,
+                time,
+                venueId: venue.id,
+                venueName: venue.name,
+                venueShort: venue.shortName,
+                corridor: venue.corridor,
+                neighborhood: venue.neighborhood,
+                address: venue.address,
+                distanceMiles: venue.distanceMiles,
+                lat: venue.lat,
+                lng: venue.lng,
+                venueColor: venue.color,
+                ticketUrl,
+                imageUrl,
+                genre,
+                price: isFree ? 'Free' : null,
+                ageRestriction: /18\+/i.test(combined) ? '18+' : 'All Ages',
+                soldOut: /sold out/i.test(barText),
+                source: 'Navy Pier Direct',
+                spotifyUrl: `https://open.spotify.com/search/${encodeURIComponent(headliner)}`,
+                spotifyArtistId: null,
+                spotifyTrackUrl: null,
+                previewAudioUrl: null,
+                previewTrackTitle: null,
+              });
+            }
+          } catch {
+            // Skip individual malformed event page
+          }
+        })
+      );
+    }
+  } catch (err) {
+    console.error('Navy Pier scrape error:', err.message);
+  }
+  return events;
+}
+
 function deduplicateEvents(allEvents) {
+  const GENERIC_GENRE = /^(other|live music|undefined|music)$/i;
   const map = new Map();
   for (const ev of allEvents) {
     const normHead = ev.headliner.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 14);
@@ -837,6 +959,9 @@ function deduplicateEvents(allEvents) {
       }
       if (!existing.price && ev.price) {
         existing.price = ev.price;
+      }
+      if (GENERIC_GENRE.test(existing.genre || '') && ev.genre && !GENERIC_GENRE.test(ev.genre)) {
+        existing.genre = ev.genre;
       }
       if (existing.support.length === 0 && ev.support.length > 0) {
         existing.support = ev.support;
@@ -959,6 +1084,7 @@ export async function syncAllChicagoMusicEvents() {
     whistlerEvents,
     metroEvents,
     hideoutEvents,
+    navyPierEvents,
   ] = await Promise.all([
     fetchTicketmasterEvents(),
     fetchDiceEvents(),
@@ -969,6 +1095,7 @@ export async function syncAllChicagoMusicEvents() {
     scrapeWhistlerDirect(),
     scrapeMetroDirect(),
     scrapeHideoutDirect(),
+    scrapeNavyPierDirect(),
   ]);
 
   const rawTotal =
@@ -980,7 +1107,8 @@ export async function syncAllChicagoMusicEvents() {
     colesEvents.length +
     whistlerEvents.length +
     metroEvents.length +
-    hideoutEvents.length;
+    hideoutEvents.length +
+    navyPierEvents.length;
 
   const deduped = deduplicateEvents([
     ...tmEvents,
@@ -992,6 +1120,7 @@ export async function syncAllChicagoMusicEvents() {
     ...whistlerEvents,
     ...metroEvents,
     ...hideoutEvents,
+    ...navyPierEvents,
   ]);
 
   // Venue calendars also list closures and private rentals, which aren't shows
@@ -1022,6 +1151,7 @@ export async function syncAllChicagoMusicEvents() {
       whistlerDirect: whistlerEvents.length,
       metroDirect: metroEvents.length,
       hideoutDirect: hideoutEvents.length,
+      navyPierDirect: navyPierEvents.length,
       rawTotal,
       uniqueEvents: enriched.length,
     },
