@@ -41,6 +41,7 @@ import {
   scoreEventForUser,
 } from './spotify';
 import { SpotifySyncModal } from './SpotifySyncModal';
+import { VenueMap } from './VenueMap';
 
 export interface Venue {
   id: string;
@@ -569,9 +570,10 @@ export default function App() {
 
   // Counts on genre and venue chips ignore that chip group's own selection,
   // so they show what picking another option would add
-  const { filteredEvents, genreCounts, venueCounts } = useMemo(() => {
+  const { filteredEvents, mapEvents, genreCounts, venueCounts } = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const filtered: MusicEvent[] = [];
+    const mapEvents: MusicEvent[] = [];
     const genreCounts: Record<string, number> = {};
     const venueCounts: Record<string, number> = {};
 
@@ -598,10 +600,13 @@ export default function App() {
       const genreOk = selectedGenres.length === 0 || families.some((id) => selectedGenres.includes(id));
 
       if (venueOk) for (const id of families) genreCounts[id] = (genreCounts[id] || 0) + 1;
-      if (genreOk) venueCounts[ev.venueId] = (venueCounts[ev.venueId] || 0) + 1;
+      if (genreOk) {
+        venueCounts[ev.venueId] = (venueCounts[ev.venueId] || 0) + 1;
+        mapEvents.push(ev);
+      }
       if (venueOk && genreOk) filtered.push(ev);
     }
-    return { filteredEvents: filtered, genreCounts, venueCounts };
+    return { filteredEvents: filtered, mapEvents, genreCounts, venueCounts };
   }, [upcomingEvents, selectedCorridor, selectedVenueIds, selectedGenres, maxDistance, searchQuery]);
 
   // Group events by YYYY-MM-DD, with shows matching the taste profile first
@@ -1311,78 +1316,20 @@ export default function App() {
           )}
 
           {viewMode === 'radar' && (
-            <div className="radar-container">
-              <div className="radar-intro">
-                <h3>Venues around Ward 1</h3>
-                <p>Rings mark every 2 miles from Wicker Park / Logan Square. Tap a venue to filter the calendar.</p>
-              </div>
-
-              <div className="radar-scroll">
-                <svg viewBox="0 0 680 520" className="radar-svg" role="img" aria-label="Map of venues by distance from Ward 1">
-                  {/* Radar distance rings (2mi, 4mi, 6mi, 8mi, 10mi) */}
-                  {[2, 4, 6, 8, 10].map((mi) => (
-                    <g key={mi}>
-                      <circle
-                        cx={320}
-                        cy={250}
-                        r={mi * 23}
-                        fill="none"
-                        stroke="rgba(255,255,255,0.08)"
-                        strokeDasharray="4 4"
-                      />
-                      <text x={324} y={250 - mi * 23 + 12} fill="#6b7280" fontSize="10">
-                        {mi} mi
-                      </text>
-                    </g>
-                  ))}
-
-                  {/* Milwaukee Ave Diagonal Line */}
-                  <line x1={140} y1={110} x2={450} y2={340} stroke="rgba(16, 185, 129, 0.25)" strokeWidth={3} />
-                  <text x={150} y={102} fill="#10b981" fontSize="11" fontWeight="600">
-                    Milwaukee Ave
-                  </text>
-
-                  {/* Ward 1 Center Marker */}
-                  <circle cx={320} cy={250} r={6} fill="#f97316" />
-                  <circle cx={320} cy={250} r={14} fill="none" stroke="#f97316" strokeOpacity={0.5} />
-                  <text x={332} y={254} fill="#fdba74" fontSize="11" fontWeight="700">
-                    WARD 1
-                  </text>
-
-                  {/* Venue Nodes */}
-                  {filteredVenues.map((v) => {
-                    const dx = (v.lng - data.wardCenter.lng) * 2400;
-                    const dy = (data.wardCenter.lat - v.lat) * 3100;
-                    const cx = Math.max(40, Math.min(640, 320 + dx));
-                    const cy = Math.max(30, Math.min(490, 250 + dy));
-                    const isSelected = selectedVenueIds.includes(v.id);
-
-                    return (
-                      <g
-                        key={v.id}
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => {
-                          toggleVenueFilter(v.id);
-                          setViewMode('month');
-                        }}
-                      >
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={isSelected ? 9 : 6}
-                          fill={v.color}
-                          stroke="#0b0b12"
-                          strokeWidth={2}
-                        />
-                        <text x={cx + 9} y={cy + 3} fill="#e5e7eb" fontSize="10" fontWeight="600">
-                          {v.shortName}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </svg>
-              </div>
-            </div>
+            <VenueMap
+              venues={filteredVenues}
+              wardCenter={data.wardCenter}
+              selectedVenueIds={selectedVenueIds}
+              venueCounts={venueCounts}
+              events={mapEvents}
+              selectedDate={selectedDate}
+              maxDistance={maxDistance}
+              onToggleVenue={toggleVenueFilter}
+              onFocusVenueCalendar={(id) => {
+                setSelectedVenueIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+                setViewMode('month');
+              }}
+            />
           )}
         </div>
 
