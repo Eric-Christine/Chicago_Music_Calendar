@@ -34,16 +34,25 @@ interface VenueMapProps {
 
 type BasemapStyle = 'dark' | 'streets';
 
-const TILE_LAYERS: Record<BasemapStyle, { url: string; attribution: string }> = {
+interface TileSpec {
+  url: string;
+  overlayUrl?: string;
+  maxNativeZoom: number;
+  attribution: string;
+}
+
+const TILE_LAYERS: Record<BasemapStyle, TileSpec> = {
   dark: {
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    overlayUrl:
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+    maxNativeZoom: 16,
+    attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ',
   },
   streets: {
-    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noreferrer">CARTO</a>',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+    maxNativeZoom: 18,
+    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, TomTom, Intermap',
   },
 };
 
@@ -106,7 +115,7 @@ export function VenueMap({
 }: VenueMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const tileGroupRef = useRef<L.LayerGroup | null>(null);
   const ringsLayerRef = useRef<L.LayerGroup | null>(null);
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const hasFittedRef = useRef(false);
@@ -178,6 +187,7 @@ export function VenueMap({
 
     L.control.zoom({ position: 'topright' }).addTo(map);
 
+    tileGroupRef.current = L.layerGroup().addTo(map);
     ringsLayerRef.current = L.layerGroup().addTo(map);
     markersLayerRef.current = L.layerGroup().addTo(map);
 
@@ -194,26 +204,31 @@ export function VenueMap({
       window.clearTimeout(timer);
       map.remove();
       mapRef.current = null;
-      tileLayerRef.current = null;
+      tileGroupRef.current = null;
       ringsLayerRef.current = null;
       markersLayerRef.current = null;
       hasFittedRef.current = false;
     };
   }, [wardCenter.lat, wardCenter.lng]);
 
-  // Swap basemap tile layer
+  // Swap basemap tile layers (base + optional street/place label overlay)
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    if (tileLayerRef.current) {
-      map.removeLayer(tileLayerRef.current);
-    }
+    const group = tileGroupRef.current;
+    if (!group) return;
+    group.clearLayers();
     const spec = TILE_LAYERS[basemap];
-    tileLayerRef.current = L.tileLayer(spec.url, {
+    L.tileLayer(spec.url, {
       attribution: spec.attribution,
-      subdomains: 'abcd',
-      maxZoom: 19,
-    }).addTo(map);
+      maxNativeZoom: spec.maxNativeZoom,
+      maxZoom: 18,
+    }).addTo(group);
+    if (spec.overlayUrl) {
+      L.tileLayer(spec.overlayUrl, {
+        maxNativeZoom: spec.maxNativeZoom,
+        maxZoom: 18,
+        pane: 'tilePane',
+      }).addTo(group);
+    }
   }, [basemap]);
 
   // Render Ward 1 center + optional distance rings
