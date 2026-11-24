@@ -124,9 +124,23 @@ const FOR_YOU_PAGE = 24;
 // Static builds (GitHub Pages) have no API server; data comes from the snapshot refreshed by CI
 const IS_STATIC = import.meta.env.VITE_STATIC === '1';
 const BASE = import.meta.env.BASE_URL;
+const SYNC_WORKFLOW_URL =
+  'https://github.com/Eric-Christine/Chicago_Music_Calendar/actions/workflows/deploy.yml';
+const SYNC_WORKFLOW_API =
+  'https://api.github.com/repos/Eric-Christine/Chicago_Music_Calendar/actions/workflows/deploy.yml/runs?per_page=1';
 
 function chicagoToday() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' });
+}
+
+function formatRelativeSync(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(diffMs) || diffMs < 60_000) return 'just now';
+  const mins = Math.round(diffMs / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function addMonthsToDateStr(dateStr: string, months: number): string {
@@ -360,7 +374,13 @@ export default function App() {
   const [tasteProfile, setTasteProfile] = useState<TasteProfile | null>(loadTasteProfile);
   const [spotifyOpen, setSpotifyOpen] = useState(false);
   const [spotifyNotice, setSpotifyNotice] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<{
+    text: string;
+    actionUrl?: string;
+    actionLabel?: string;
+  } | null>(null);
   const [forYouLimit, setForYouLimit] = useState(FOR_YOU_PAGE);
+  const syncPollTimerRef = useRef<number | null>(null);
 
   // Audio player for 30s track previews. One element is reused so a tap-unlocked
   // element stays unlocked on mobile browsers.
@@ -379,15 +399,21 @@ export default function App() {
         setSpotifyNotice(null);
       })
       .catch((err) => setSpotifyNotice(err?.message || 'Spotify sync failed.'));
+
+    return () => {
+      if (syncPollTimerRef.current) window.clearTimeout(syncPollTimerRef.current);
+    };
   }, []);
 
   async function loadCalendarData() {
     try {
       setLoading(true);
       // Try live backend API first, fallback to bundled static snapshot
-      let res = IS_STATIC ? null : await fetch(`${BASE}api/calendar`).catch(() => null);
+      let res = IS_STATIC
+        ? null
+        : await fetch(`${BASE}api/calendar`, { cache: 'no-store' }).catch(() => null);
       if (!res || !res.ok) {
-        res = await fetch(`${BASE}events_snapshot.json`);
+        res = await fetch(`${BASE}events_snapshot.json`, { cache: 'no-store' });
       }
       const json: CalendarPayload = await res.json();
       setData(json);
@@ -398,16 +424,105 @@ export default function App() {
     }
   }
 
+  async function fetchFreshSnapshot(): Promise<CalendarPayload> {
+    const res = await fetch(`${BASE}events_snapshot.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function checkRemoteSyncRun(): Promise<{ running: boolean; htmlUrl?: string }> {
+    try {
+      const res = await fetch(SYNC_WORKFLOW_API, { cache: 'no-store' });
+      if (!res.ok) return { running: false };
+      const json = await res.json();
+      const latest = json.workflow_runs?.[0];
+      if (!latest) return { running: false };
+      const active = latest.status === 'in_progress' || latest.status === 'queued';
+      return { running: active, htmlUrl: latest.html_url || SYNC_WORKFLOW_URL };
+    } catch {
+      return { running: false };
+    }
+  }
+
+  function scheduleStaticSyncPoll(prevSyncedAt: string, attemptsLeft: number) {
+    if (syncPollTimerRef.current) window.clearTimeout(syncPollTimerRef.current);
+    if (attemptsLeft <= 0) return;
+    syncPollTimerRef.current = window.setTimeout(async () => {
+      try {
+        const latest = await fetchFreshSnapshot();
+        if (latest.lastSyncedAt !== prevSyncedAt) {
+          setData(latest);
+          setSyncNotice({
+            text: `Synced! Loaded ${latest.events.length} upcoming shows across ${latest.venues.length} venues (${formatRelativeSync(latest.lastSyncedAt)}).`,
+          });
+          return;
+        }
+        const run = await checkRemoteSyncRun();
+        if (run.running) {
+          scheduleStaticSyncPoll(prevSyncedAt, attemptsLeft - 1);
+        } else {
+          setSyncNotice({
+            text: `Up to date · ${latest.events.length} shows (synced ${formatRelativeSync(latest.lastSyncedAt)} · auto-syncs every 6h).`,
+            actionUrl: SYNC_WORKFLOW_URL,
+            actionLabel: 'Run live scrape',
+          });
+        }
+      } catch {
+        // ignore background poll errors
+      }
+    }, 10_000);
+  }
+
   async function handleManualSync() {
+    if (syncPollTimerRef.current) window.clearTimeout(syncPollTimerRef.current);
+    const prevCount = data?.events.length || 0;
+    const prevSyncedAt = data?.lastSyncedAt || '';
+
     try {
       setSyncing(true);
-      const res = await fetch(`${BASE}api/sync`, { method: 'POST' });
-      if (res.ok) {
-        const updated = await res.json();
-        setData(updated);
+      if (!IS_STATIC) {
+        const res = await fetch(`${BASE}api/sync`, { method: 'POST' });
+        if (res.ok) {
+          const updated: CalendarPayload = await res.json();
+          setData(updated);
+          const diff = updated.events.length - prevCount;
+          const diffLabel = diff > 0 ? ` (+${diff} new)` : '';
+          setSyncNotice({
+            text: `Synced ${updated.events.length} shows across ${updated.venues.length} venues${diffLabel}.`,
+          });
+          return;
+        }
+      }
+
+      // Static GitHub Pages (or API fallback): fetch cache-busted snapshot & check live CI sync
+      const updated = await fetchFreshSnapshot();
+      setData(updated);
+      const isNewer = Boolean(prevSyncedAt && updated.lastSyncedAt !== prevSyncedAt);
+      const diff = updated.events.length - prevCount;
+      const run = await checkRemoteSyncRun();
+
+      if (run.running) {
+        setSyncNotice({
+          text: 'A live venue sync is running right now — this page will refresh automatically once it publishes.',
+          actionUrl: run.htmlUrl || SYNC_WORKFLOW_URL,
+          actionLabel: 'Watch sync',
+        });
+        scheduleStaticSyncPoll(updated.lastSyncedAt, 12);
+      } else if (isNewer) {
+        const diffLabel = diff > 0 ? ` (+${diff} new)` : '';
+        setSyncNotice({
+          text: `Updated! Loaded ${updated.events.length} shows${diffLabel} (synced ${formatRelativeSync(updated.lastSyncedAt)}).`,
+        });
+      } else {
+        setSyncNotice({
+          text: `Up to date · ${updated.events.length} shows (synced ${formatRelativeSync(updated.lastSyncedAt)} · auto-syncs every 6h).`,
+          actionUrl: SYNC_WORKFLOW_URL,
+          actionLabel: 'Run live scrape',
+        });
       }
     } catch (err) {
       console.error('Sync failed:', err);
+      setSyncNotice({ text: 'Couldn’t check for updates right now. Try again in a moment.' });
     } finally {
       setSyncing(false);
     }
@@ -784,12 +899,19 @@ export default function App() {
             Thalia Hall, Metro and {Math.max(0, data.venues.length - 6)} more stages.
           </p>
           <div className="hero-actions">
-            {!IS_STATIC && (
-              <button className="btn btn-primary" onClick={handleManualSync} disabled={syncing}>
-                <RefreshCw size={15} className={syncing ? 'spin' : ''} />
-                {syncing ? 'Syncing…' : 'Sync now'}
-              </button>
-            )}
+            <button
+              className="btn btn-primary"
+              onClick={handleManualSync}
+              disabled={syncing}
+              title={
+                IS_STATIC
+                  ? 'Check for newly synced shows and reload the latest schedule'
+                  : 'Re-scrape all Chicago venues for the latest shows'
+              }
+            >
+              <RefreshCw size={15} className={syncing ? 'spin' : ''} />
+              {syncing ? 'Syncing…' : 'Refresh shows'}
+            </button>
             <button
               className="btn btn-spotify"
               onClick={() => (tasteProfile ? setViewMode('foryou') : setSpotifyOpen(true))}
@@ -843,6 +965,28 @@ export default function App() {
           </div>
         </dl>
       </header>
+
+      {syncNotice && (
+        <div className="notice-bar notice-sync" role="status">
+          <span>{syncNotice.text}</span>
+          <div className="notice-actions">
+            {syncNotice.actionUrl && syncNotice.actionLabel && (
+              <a
+                className="btn btn-sm"
+                href={syncNotice.actionUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {syncNotice.actionLabel}
+                <ExternalLink size={12} />
+              </a>
+            )}
+            <button className="link-btn" onClick={() => setSyncNotice(null)} aria-label="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {spotifyNotice && (
         <div className="notice-bar" role="status">

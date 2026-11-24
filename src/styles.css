@@ -1601,7 +1601,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 10px 12px;
   margin-bottom: 14px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
@@ -1609,6 +1610,19 @@ button {
   background: rgba(29, 185, 84, 0.1);
   color: #bbf7d0;
   font-size: 0.86rem;
+}
+
+.notice-bar.notice-sync {
+  border-color: rgba(255, 107, 74, 0.35);
+  background: rgba(255, 107, 74, 0.1);
+  color: var(--text);
+}
+
+.notice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .btn-spotify-solid {
