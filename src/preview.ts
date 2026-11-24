@@ -1,36 +1,18 @@
-// Deezer's API has no CORS headers but does support JSONP
-let jsonpCounter = 0;
-
-export function deezerJsonp<T>(path: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const callback = `__deezer_cb_${Date.now()}_${jsonpCounter++}`;
-    const script = document.createElement('script');
-    const cleanup = () => {
-      clearTimeout(timer);
-      delete (window as any)[callback];
-      script.remove();
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error('Deezer request timed out'));
-    }, 8000);
-    (window as any)[callback] = (data: T) => {
-      cleanup();
-      resolve(data);
-    };
-    script.onerror = () => {
-      cleanup();
-      reject(new Error('Deezer request failed'));
-    };
-    const sep = path.includes('?') ? '&' : '?';
-    script.src = `https://api.deezer.com/${path}${sep}output=jsonp&callback=${callback}`;
-    document.head.appendChild(script);
+async function fetchDeezer<T>(params: Record<string, string>): Promise<T> {
+  const url = new URL('https://ericchristine.com/api/music-preview.php');
+  url.search = new URLSearchParams(params).toString();
+  const response = await fetch(url, {
+    credentials: 'omit',
+    referrerPolicy: 'no-referrer',
+    signal: AbortSignal.timeout(8000),
   });
+  if (!response.ok) throw new Error('Deezer request failed');
+  return response.json() as Promise<T>;
 }
 
 // Preview URLs are signed and expire within minutes, so they are fetched at play time
 export async function fetchDeezerPreviewUrl(trackId: number): Promise<string> {
-  const track = await deezerJsonp<{ preview?: string }>(`track/${trackId}`);
+  const track = await fetchDeezer<{ preview?: string }>({ track: String(trackId) });
   if (!track?.preview) throw new Error('No preview for this track');
   return track.preview;
 }
@@ -39,13 +21,13 @@ export async function fetchDeezerRelatedArtists(artistName: string): Promise<{
   genres?: string[];
   related: string[];
 }> {
-  const search = await deezerJsonp<{ data?: Array<{ id: number; name: string }> }>(
-    `search/artist?q=${encodeURIComponent(artistName)}&limit=1`
+  const search = await fetchDeezer<{ data?: Array<{ id: number; name: string }> }>(
+    { search: artistName }
   );
   const artist = search?.data?.[0];
   if (!artist) return { related: [] };
-  const rel = await deezerJsonp<{ data?: Array<{ name: string }> }>(
-    `artist/${artist.id}/related?limit=20`
+  const rel = await fetchDeezer<{ data?: Array<{ name: string }> }>(
+    { related: String(artist.id) }
   );
   return {
     related: (rel?.data || []).map((a) => a.name).filter(Boolean),

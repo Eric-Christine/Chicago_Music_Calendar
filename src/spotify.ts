@@ -105,27 +105,18 @@ export function saveTasteProfile(profile: TasteProfile | null): void {
   }
 }
 
-function loadTokens(): StoredTokens | null {
-  try {
-    const raw = localStorage.getItem(TOKEN_KEY);
-    return raw ? (JSON.parse(raw) as StoredTokens) : null;
-  } catch {
-    return null;
-  }
-}
+let sessionTokens: StoredTokens | null = null;
 
-function saveTokens(tokens: StoredTokens | null): void {
-  try {
-    if (tokens) localStorage.setItem(TOKEN_KEY, JSON.stringify(tokens));
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    // ignore
-  }
+// Migrate browsers that used the previous persistent token store.
+try {
+  localStorage.removeItem(TOKEN_KEY);
+} catch {
+  // Browser storage can be disabled.
 }
 
 export function disconnectTasteProfile(): void {
   saveTasteProfile(null);
-  saveTokens(null);
+  sessionTokens = null;
 }
 
 // --- PKCE OAuth 2.0 Helpers ---
@@ -232,13 +223,13 @@ export async function completeSpotifyCallbackIfPresent(
     expiresAt: Date.now() + (tokenData.expires_in || 3600) * 1000 - 30_000,
     clientId,
   };
-  saveTokens(stored);
+  sessionTokens = stored;
 
   return fetchSpotifyTasteProfile(stored, onProgress);
 }
 
 async function getValidAccessToken(): Promise<StoredTokens | null> {
-  const tokens = loadTokens();
+  const tokens = sessionTokens;
   if (!tokens) return null;
   if (Date.now() < tokens.expiresAt) return tokens;
   if (!tokens.refreshToken) return null;
@@ -262,7 +253,8 @@ async function getValidAccessToken(): Promise<StoredTokens | null> {
     expiresAt: Date.now() + (data.expires_in || 3600) * 1000 - 30_000,
     clientId: tokens.clientId,
   };
-  saveTokens(refreshed);
+  if (sessionTokens !== tokens) return sessionTokens;
+  sessionTokens = refreshed;
   return refreshed;
 }
 
